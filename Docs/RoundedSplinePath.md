@@ -2,10 +2,11 @@
 
 An Editor tool for authoring paths that are straight segments joined by smoothly rounded
 corners at a single radius — either by rounding a path already drawn with Unity's own
-Spline Tool, or by clicking waypoints directly in the Scene view. Pairs naturally with the
-[Spline Road Generator](SplineRoadGenerator.md): a rounded corner spreads its turn across
-several tiles, so the road generator's default behavior (rotate a straight tile to follow
-the tangent) reads as a smoothly curving road with no corner-prefab substitution needed.
+Spline Tool, or by clicking waypoints directly in the Scene view. Not used by the
+[Road Generator](RoadGenerator.md) — that tool snaps placement to a grid with only 90°
+rotations, so it wants sharp, orthogonal input rather than a rounded curve. This tool is
+for organic, freeform paths instead: decorative walkways, footpaths, or any curve that
+isn't a grid-snapped road network.
 
 - **Script**: `Assets/Editor/RoundedSplinePathWindow.cs` (window) +
   `Assets/Editor/SplineFilletUtility.cs` (geometry core, no `UnityEditor` dependency)
