@@ -73,7 +73,7 @@ categories map to the same default prefabs and "open sides at rotation 0":
 | Dead-end | `road-end` | South only |
 | Straight | `road-straight` | West + East (local X through-axis) |
 | Bend | `road-bend` | North + East |
-| T-junction | `road-side` | West + East + North |
+| T-junction | `road-intersection-path` | West + East + North |
 | 4-way | `road-crossroad` | North + East + South + West (rotation is cosmetic only) |
 
 A painted Tilemap cell's local X maps to world X and local Y maps to world Z (via the

@@ -36,11 +36,15 @@ namespace OpenCity.EditorTools
         [SerializeField] private string parentName = "Road";
         [SerializeField] private Transform parentUnder;
 
+        private Vector2 scrollPosition;
+
         [MenuItem("Tools/OpenCity/Road Generator")]
         private static void Open()
         {
             RoadGeneratorWindow window = GetWindow<RoadGeneratorWindow>("Road Generator");
-            window.minSize = new Vector2(360, 520);
+            // Low enough to dock in a short panel - the field list scrolls (see OnGUI), so the
+            // minimum no longer has to fit every field at once.
+            window.minSize = new Vector2(360, 320);
         }
 
         private void OnEnable()
@@ -50,6 +54,11 @@ namespace OpenCity.EditorTools
 
         private void OnGUI()
         {
+            // Begin/End rather than a ScrollViewScope: the scrolled region is everything except
+            // the Generate/Clear row below, which stays pinned to the bottom of the window so it
+            // is reachable without scrolling no matter how short the window is docked.
+            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
+
             EditorGUILayout.LabelField("Spline", EditorStyles.boldLabel);
             splineContainer = (SplineContainer)EditorGUILayout.ObjectField(
                 "Spline Container", splineContainer, typeof(SplineContainer), true);
@@ -119,6 +128,8 @@ namespace OpenCity.EditorTools
 
             EditorGUILayout.Space();
             DrawPreview();
+
+            EditorGUILayout.EndScrollView();
 
             EditorGUILayout.Space();
             using (new EditorGUILayout.HorizontalScope())

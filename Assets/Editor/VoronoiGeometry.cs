@@ -106,6 +106,40 @@ namespace OpenCity.EditorTools
         }
 
         /// <summary>
+        /// Maps a point into a squeezed space where distance along <paramref name="angleDegrees"/>
+        /// is compressed by <paramref name="stretchFactor"/> and the perpendicular distance is
+        /// expanded by the same factor. Running the ordinary isotropic Delaunay/Voronoi pipeline
+        /// on points warped this way and mapping the result back with
+        /// <see cref="UnwarpAnisotropic"/> turns what would be round Voronoi cells into cells
+        /// elongated along that angle - a circle in squeezed space becomes an ellipse once
+        /// unwarped. Returned coordinates are relative to <paramref name="pivot"/> (not
+        /// re-translated back to it) - callers needing a centroid/bounding-radius in this same
+        /// squeezed space must recompute it from warped points rather than reusing the
+        /// world-space one.
+        /// </summary>
+        public static Vector2 WarpAnisotropic(Vector2 p, Vector2 pivot, float angleDegrees, float stretchFactor)
+        {
+            Vector2 d = p - pivot;
+            float rad = -angleDegrees * Mathf.Deg2Rad;
+            float cos = Mathf.Cos(rad);
+            float sin = Mathf.Sin(rad);
+            float rx = d.x * cos - d.y * sin;
+            float ry = d.x * sin + d.y * cos;
+            return new Vector2(rx / stretchFactor, ry * stretchFactor);
+        }
+
+        /// <summary>Exact inverse of <see cref="WarpAnisotropic"/> - reverses the scale then the rotation, then re-adds pivot.</summary>
+        public static Vector2 UnwarpAnisotropic(Vector2 p, Vector2 pivot, float angleDegrees, float stretchFactor)
+        {
+            float rx = p.x * stretchFactor;
+            float ry = p.y / stretchFactor;
+            float rad = angleDegrees * Mathf.Deg2Rad;
+            float cos = Mathf.Cos(rad);
+            float sin = Mathf.Sin(rad);
+            return pivot + new Vector2(rx * cos - ry * sin, rx * sin + ry * cos);
+        }
+
+        /// <summary>
         /// Rejection-sampling site scatter: candidates are drawn from the polygon's AABB
         /// and kept only if inside the polygon, at least <paramref name="margin"/> from its
         /// boundary, and at least <paramref name="minSpacing"/> from every already-accepted
@@ -117,10 +151,20 @@ namespace OpenCity.EditorTools
         /// never UnityEngine.Random, whose global state is shared editor-wide and would
         /// break the "same inputs -> same output" guarantee this tool relies on for its
         /// live preview to match Generate exactly.
+        ///
+        /// <paramref name="gridBias"/> (0 = off, the default - literally skipped, not just
+        /// a no-op) nudges each candidate toward the nearest point on an implicit
+        /// world-X/Z-aligned lattice of spacing <paramref name="gridSpacing"/> (0 = falls
+        /// back to <paramref name="minSpacing"/>) before the acceptance tests below run -
+        /// this makes neighboring sites more likely to end up sharing an X or Y coordinate,
+        /// which is what makes their shared Voronoi edge land near-cardinal instead of at an
+        /// arbitrary skew. Applied in true (un-warped) world space regardless of anisotropic
+        /// stretch, same as every other input to this method.
         /// </summary>
         public static List<Vector2> ScatterSites(
             IReadOnlyList<Vector2> polygon, int requestedCount, float minSpacing, float margin,
-            int seed, out int attemptsUsed, int maxAttemptsPerSite = 200)
+            int seed, out int attemptsUsed, int maxAttemptsPerSite = 200,
+            float gridBias = 0f, float gridSpacing = 0f)
         {
             var accepted = new List<Vector2>();
             attemptsUsed = 0;
@@ -142,6 +186,7 @@ namespace OpenCity.EditorTools
             int attemptCap = requestedCount * Mathf.Max(1, maxAttemptsPerSite);
             float width = max.x - min.x;
             float height = max.y - min.y;
+            float latticeSpacing = gridSpacing > 0f ? gridSpacing : minSpacing;
 
             while (accepted.Count < requestedCount && attemptsUsed < attemptCap)
             {
@@ -149,6 +194,14 @@ namespace OpenCity.EditorTools
                 var candidate = new Vector2(
                     min.x + (float)rng.NextDouble() * width,
                     min.y + (float)rng.NextDouble() * height);
+
+                if (gridBias > 0f && latticeSpacing > 0.0001f)
+                {
+                    var nearestLatticePoint = new Vector2(
+                        Mathf.Round(candidate.x / latticeSpacing) * latticeSpacing,
+                        Mathf.Round(candidate.y / latticeSpacing) * latticeSpacing);
+                    candidate = Vector2.Lerp(candidate, nearestLatticePoint, Mathf.Clamp01(gridBias));
+                }
 
                 if (!PointInPolygon(candidate, polygon)) continue;
                 if (DistanceToPolygonBoundary(candidate, polygon) < margin) continue;

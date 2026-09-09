@@ -108,7 +108,7 @@ North.
 | Dead-end | `road-end` | South only |
 | Straight | `road-straight` | West + East (local X through-axis) |
 | Bend | `road-bend` | North + East |
-| T-junction | `road-side` (the kit's real T-junction — `road-intersection` is not) | West + East + North |
+| T-junction | `road-intersection-path` (the kit's real, full-width T-junction — `road-side` is a narrower driveway-style branch, and plain `road-intersection` is a different connector) | West + East + North |
 | 4-way | `road-crossroad` | North + East + South + West (rotation is cosmetic only) |
 
 ## Orthogonal input
@@ -139,27 +139,32 @@ grid-snapped road network, that's outside this tool's scope in v1.
 
 ### Shapes
 
-Every prefab that's actually usable in one of the five slots below — 1×1 grid-cell
-footprint, flat, and matching one of the five open-side categories — lives under
+Most prefabs that are actually usable in one of the five slots below — 1×1 grid-cell
+footprint, flat, and matching one of the five open-side categories — live under
 `Assets/Prefabs/RoadShapes/`, separate from the rest of the Kenney city-kit-roads set
 (2×2 curve pieces, ramps/bridges, signs, the 1×2 split piece, the 0-open-side filler
-square, driveway stubs, and `road-intersection*`, which despite its name and 1×1
-footprint is a different connector than `road-side` and is *not* the kit's T-junction —
-the same kind of name-doesn't-mean-compatible trap as `road-roundabout` (see the note
-below). Those all stay in `Assets/Prefabs/` for manual placement; this tool's five slots
-below only ever need to look in `RoadShapes/`.
+square, driveway stubs, etc.) — with one exception: the T-junction default,
+`road-intersection-path`, lives directly under `Assets/Prefabs/` alongside its
+`road-intersection*` cosmetic siblings, not in `RoadShapes/`.
+
+**A naming trap worth knowing about**: despite the name, `road-side` (which lives in
+`RoadShapes/`, alongside its `road-side-entry`/`road-side-exit` siblings) is *not* the
+kit's T-junction — it's a narrower driveway-style branch, one open side short of a
+full-width road, and produces a visibly wrong-looking T when used as one. The T-junction
+default was corrected to `road-intersection-path` after visual confirmation in the
+Editor. `road-roundabout` is a separate, unrelated trap (see the note below).
 
 | Field | Description |
 |---|---|
 | Dead-End Prefab | Placed at a path endpoint (1 open side). **Required.** Defaults to `road-end`. |
 | Straight Prefab | Placed where two opposite sides are open. **Required.** Defaults to `road-straight`. |
 | Bend Prefab | Placed where two adjacent sides are open. **Required.** Defaults to `road-bend`. |
-| T-Junction Prefab | Placed where three sides are open. **Optional** — if left empty and a T-junction cell occurs, that cell is skipped with a console warning. Defaults to `road-side`. |
+| T-Junction Prefab | Placed where three sides are open. **Optional** — if left empty and a T-junction cell occurs, that cell is skipped with a console warning. Defaults to `road-intersection-path`. |
 | Four-Way Prefab | Placed where all four sides are open. **Optional**, same skip-with-warning behavior. Defaults to `road-crossroad`. |
 
 Each field is a manual cosmetic-variant slot — e.g. swap in `road-straight-barrier`,
-`road-bend-sidewalk`, `road-side-entry`, or `road-crossroad-line` for a different look
-within the same shape category. The tool never auto-picks between kit siblings.
+`road-bend-sidewalk`, `road-intersection-line`, or `road-crossroad-line` for a different
+look within the same shape category. The tool never auto-picks between kit siblings.
 (`road-roundabout` is *not* a valid sibling despite the name — measured footprint is a
 3×3 structure, not the 1×1 grid cell every shape category assumes.)
 

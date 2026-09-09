@@ -37,12 +37,15 @@ namespace OpenCity.EditorTools
         [SerializeField] private List<Vector3> waypointsWorld = new List<Vector3>();
 
         private bool isPlacing;
+        private Vector2 scrollPosition;
 
         [MenuItem("Tools/OpenCity/Rounded Spline Path Tool")]
         private static void Open()
         {
             RoundedSplinePathWindow window = GetWindow<RoundedSplinePathWindow>("Rounded Spline Path");
-            window.minSize = new Vector2(360, 480);
+            // Low enough to dock in a short panel - the body scrolls (see OnGUI), so the minimum
+            // no longer has to fit every field at once.
+            window.minSize = new Vector2(360, 320);
         }
 
         private void OnEnable()
@@ -62,7 +65,13 @@ namespace OpenCity.EditorTools
 
         private void OnGUI()
         {
+            // The mode toolbar stays pinned above the scrolled body - it selects which section is
+            // shown, so it should never scroll out of reach. Unlike the road generator windows,
+            // each section here ends with its own action button, so those scroll with the body
+            // rather than being pinned to the bottom of the window.
             mode = (Mode)GUILayout.Toolbar((int)mode, new[] { "Round Existing Spline", "Draw New Waypoints" });
+
+            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Rounding", EditorStyles.boldLabel);
@@ -81,6 +90,8 @@ namespace OpenCity.EditorTools
                     DrawWaypointSection();
                     break;
             }
+
+            EditorGUILayout.EndScrollView();
         }
 
         // ---------------------------------------------------------------
