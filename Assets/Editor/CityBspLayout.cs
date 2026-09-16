@@ -83,6 +83,29 @@ namespace OpenCity.EditorTools
             }
         }
 
+        /// <summary>
+        /// One region of the BSP tree, in the order SplitRegion visited it (preorder). Kept so
+        /// callers can read the tree back at a chosen depth - see <see cref="Districts"/> - which
+        /// is how the highway planner groups the city into clusters. The rect is the region
+        /// *between* the roads that bound it, so it includes every cut made inside it but not the
+        /// roads on its edges.
+        /// </summary>
+        public readonly struct Node
+        {
+            public readonly RectInt Rect;
+            /// <summary>0 for the root region (the whole city, or its interior with a ring road).</summary>
+            public readonly int Depth;
+            /// <summary>True if this region was never cut, i.e. it is one of <see cref="Layout.Blocks"/>.</summary>
+            public readonly bool IsLeaf;
+
+            public Node(RectInt rect, int depth, bool isLeaf)
+            {
+                Rect = rect;
+                Depth = depth;
+                IsLeaf = isLeaf;
+            }
+        }
+
         public sealed class Layout
         {
             public readonly int SideLength;
@@ -98,9 +121,11 @@ namespace OpenCity.EditorTools
             public readonly int ForcedSplitCount;
             /// <summary>Regions that wanted to split but were kept whole because every cut position would have put two intersections side by side.</summary>
             public readonly int SpacingStopCount;
+            /// <summary>Every region of the BSP tree in preorder, leaves included. See <see cref="Node"/> and <see cref="Districts"/>.</summary>
+            public readonly List<Node> Nodes;
 
             public Layout(int sideLength, HashSet<Vector2Int> roadCells, List<RectInt> blocks, List<RectInt> cuts,
-                int perimeterCellCount, int forcedSplitCount, int spacingStopCount)
+                int perimeterCellCount, int forcedSplitCount, int spacingStopCount, List<Node> nodes)
             {
                 SideLength = sideLength;
                 RoadCells = roadCells;
@@ -111,7 +136,34 @@ namespace OpenCity.EditorTools
                 PerimeterCellCount = perimeterCellCount;
                 ForcedSplitCount = forcedSplitCount;
                 SpacingStopCount = spacingStopCount;
+                Nodes = nodes;
             }
+        }
+
+        /// <summary>
+        /// The BSP tree's frontier at <paramref name="depth"/>: every region that was cut exactly
+        /// <paramref name="depth"/> times, plus every leaf that stopped splitting before it got
+        /// that far. Those regions tile the root region exactly once - no gaps, no overlaps - so
+        /// they are a partition of the city into 1 (depth 0), up to 2 (depth 1), up to 4 (depth 2)
+        /// ... clusters, following the same cuts the streets follow. Returned in the tree's
+        /// preorder, which is deterministic.
+        /// </summary>
+        public static List<RectInt> Districts(Layout layout, int depth)
+        {
+            var result = new List<RectInt>();
+            if (layout == null)
+            {
+                return result;
+            }
+            int wanted = Mathf.Max(0, depth);
+            foreach (Node node in layout.Nodes)
+            {
+                if (node.Depth == wanted || (node.IsLeaf && node.Depth < wanted))
+                {
+                    result.Add(node.Rect);
+                }
+            }
+            return result;
         }
 
         private sealed class Counters
@@ -132,11 +184,12 @@ namespace OpenCity.EditorTools
             var roads = new HashSet<Vector2Int>();
             var blocks = new List<RectInt>();
             var cuts = new List<RectInt>();
+            var nodes = new List<Node>();
             var counters = new Counters();
 
             if (n == 0)
             {
-                return new Layout(0, roads, blocks, cuts, 0, 0, 0);
+                return new Layout(0, roads, blocks, cuts, 0, 0, 0, nodes);
             }
 
             RectInt root;
@@ -163,16 +216,22 @@ namespace OpenCity.EditorTools
             if (root.width > 0 && root.height > 0)
             {
                 var rng = new System.Random(settings.Seed);
-                SplitRegion(root, rootRoadSides, 0, settings, rng, roads, blocks, cuts, counters);
+                SplitRegion(root, rootRoadSides, 0, settings, rng, roads, blocks, cuts, nodes, counters);
             }
 
-            return new Layout(n, roads, blocks, cuts, perimeterCells, counters.ForcedSplits, counters.SpacingStops);
+            return new Layout(n, roads, blocks, cuts, perimeterCells, counters.ForcedSplits, counters.SpacingStops, nodes);
         }
 
         private static void SplitRegion(
             RectInt region, Side roadSides, int depth, Settings s, System.Random rng,
-            HashSet<Vector2Int> roads, List<RectInt> blocks, List<RectInt> cuts, Counters counters)
+            HashSet<Vector2Int> roads, List<RectInt> blocks, List<RectInt> cuts, List<Node> nodes, Counters counters)
         {
+            // Recorded as a leaf up front and rewritten in place if this region turns out to be
+            // cut, so `nodes` ends up in preorder (a parent always before its two children)
+            // whichever way the decisions below go.
+            int nodeIndex = nodes.Count;
+            nodes.Add(new Node(region, depth, true));
+
             int minBlock = Mathf.Max(1, s.MinBlockSize);
 
             // A cut consumes one column/row and must leave at least minBlock cells on BOTH sides,
@@ -271,6 +330,7 @@ namespace OpenCity.EditorTools
                 childBSides = (roadSides & ~Side.South) | Side.South;
             }
 
+            nodes[nodeIndex] = new Node(region, depth, false);
             cuts.Add(cut);
             for (int x = cut.xMin; x < cut.xMax; x++)
             {
@@ -282,8 +342,8 @@ namespace OpenCity.EditorTools
 
             // Fixed child order: every rng draw is a function of the traversal, so this order is
             // part of the determinism guarantee.
-            SplitRegion(childA, childASides, depth + 1, s, rng, roads, blocks, cuts, counters);
-            SplitRegion(childB, childBSides, depth + 1, s, rng, roads, blocks, cuts, counters);
+            SplitRegion(childA, childASides, depth + 1, s, rng, roads, blocks, cuts, nodes, counters);
+            SplitRegion(childB, childBSides, depth + 1, s, rng, roads, blocks, cuts, nodes, counters);
         }
 
         /// <summary>

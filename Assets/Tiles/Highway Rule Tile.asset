@@ -1,0 +1,126 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1fae206a4cef2b34d86f46e2f85710db, type: 3}
+  m_Name: Highway Rule Tile
+  m_EditorClassIdentifier: Assembly-CSharp::OpenCity.Tiles.HighwayRuleTile
+  m_DefaultSprite: {fileID: 0}
+  m_DefaultGameObject: {fileID: 0}
+  m_DefaultColliderType: 1
+  m_TilingRules:
+  - m_Id: 0
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 1988202019996152015, guid: 7cd73ed727391fd4ba120ff4424a66dc, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 01000000010000000100000001000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 0
+  - m_Id: 1
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 4282044859283887776, guid: 86ebc7a0916ff2b4f999b38a1f704e51, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 01000000010000000200000001000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 1
+  - m_Id: 2
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 8245245949132958308, guid: a2de6ab83996e3b429e50c3cdd6d40be, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 02000000010000000200000001000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 1
+  - m_Id: 3
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 1557086706570840246, guid: a59d128597228854ab1e163f1a89a052, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 01000000010000000200000002000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 1
+  - m_Id: 4
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 8531817644824385603, guid: 5f00c7dfbd9f00e42b1c2476da40e4de, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 02000000020000000200000003000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 1
+  - m_Id: 5
+    m_Sprites:
+    - {fileID: 0}
+    m_GameObject: {fileID: 2703903030234168289, guid: 91d88246392467c4097d517d78c137ff, type: 3}
+    m_MinAnimationSpeed: 1
+    m_MaxAnimationSpeed: 1
+    m_PerlinScale: 0.5
+    m_Output: 0
+    m_ColliderType: 1
+    m_RandomTransform: 0
+    m_Scroll: {x: 0.5, y: 0.5}
+    m_Neighbors: 02000000020000000200000001000000
+    m_NeighborPositions:
+    - {x: 0, y: 1, z: 0}
+    - {x: 1, y: 0, z: 0}
+    - {x: 0, y: -1, z: 0}
+    - {x: -1, y: 0, z: 0}
+    m_RuleTransform: 1

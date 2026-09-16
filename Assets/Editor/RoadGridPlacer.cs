@@ -583,16 +583,24 @@ namespace OpenCity.EditorTools
 
         /// <summary>
         /// Horizontal-plane-only (XZ) offset, in prefab-local rotation-0 space, from the
-        /// prefab's pivot to its true footprint center - the negative of its combined
-        /// renderer bounds' center. A no-op for prefabs whose pivot is already centered
-        /// (straight/T/4-way/dead-end); corrects road-bend, whose pivot sits at the inside
-        /// corner of its L shape. Y is deliberately left untouched so a prefab whose mesh
+        /// prefab's pivot to its true footprint center: the negative of where its combined
+        /// renderer bounds sit *relative to its own root transform*. A no-op for prefabs
+        /// whose mesh is already centered on the root (straight/bend/T/4-way/dead-end);
+        /// corrects road-side, road-side-entry and road-side-exit, whose meshes sit against
+        /// one edge of their cell. Y is deliberately left untouched so a prefab whose mesh
         /// isn't Y-symmetric about its pivot (curbs, barriers) doesn't get nudged off the
         /// ground plane.
+        ///
+        /// Subtracting the root's own local position matters: a prefab authored as a variant
+        /// of an FBX can carry an offset on the root transform itself (road-bridge and
+        /// road-slant-flat-curve in Assets/Prefabs/Roads/Highway both do). That offset is
+        /// overwritten the instant an instance is positioned, so it is not a pivot error to
+        /// correct - measuring it as one would shift those pieces off their cell by exactly
+        /// the amount the root was offset by.
         /// </summary>
         public static Vector3 ComputePivotOffset(GameObject prefab)
         {
-            Vector3 boundsCenter = MeasureRendererBounds(prefab).center;
+            Vector3 boundsCenter = MeasureRendererBounds(prefab).center - prefab.transform.localPosition;
             return new Vector3(-boundsCenter.x, 0f, -boundsCenter.z);
         }
 

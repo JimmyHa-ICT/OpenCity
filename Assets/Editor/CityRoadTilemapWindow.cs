@@ -16,7 +16,11 @@ namespace OpenCity.EditorTools
     /// window places itself (a RuleTile only fills single cells), painting a RoadCoverTile on
     /// the road cells underneath. The layout algorithm lives in CityBspLayout and the
     /// roundabout choice in RoundaboutPlanner; this class is UI, preview and Tilemap I/O only.
-    /// See Docs/CityBspTilemapGenerator.md.
+    /// On top of the street grid it can lay an elevated highway network that links the city's far
+    /// apart BSP clusters - planned by HighwayPlanner and painted by HighwayBuilder as a highway
+    /// RuleTile on a second Tilemap layer, so the highway resolves its own shapes the same way the
+    /// streets do without ever mixing with them.
+    /// See Docs/CityBspTilemapGenerator.md and Docs/CityHighwayGenerator.md.
     /// </summary>
     public class CityRoadTilemapWindow : EditorWindow
     {
@@ -24,9 +28,11 @@ namespace OpenCity.EditorTools
         private const string ClearUndoLabel = "Clear City Roads (BSP Tilemap)";
         private const string CreateTilemapUndoLabel = "Create City Tilemap";
         private const string LogPrefix = "CityRoadsBsp";
+        private const string ClearConfirmOptOutKey = "OpenCity.CityRoadsBsp.ConfirmClear";
         private const string DefaultRoadTilePath = "Assets/Tiles/New Rule Tile.asset";
         private const string DefaultCoverTilePath = "Assets/Tiles/Road Cover Tile.asset";
         private const string DefaultRoundaboutPath = "Assets/Prefabs/Roads/road-roundabout.prefab";
+        private const string HighwayTilemapName = "Highways";
         private const int MinSideLength = 3;
         private const int MaxSideLength = 512;
         /// <summary>Above this many road cells the Scene preview skips per-cell squares (blocks and outline still draw).</summary>
@@ -45,6 +51,9 @@ namespace OpenCity.EditorTools
         private static readonly Color UnclassifiedCellColor = Color.magenta;
         private static readonly Color BlockColor = new Color(0.25f, 0.8f, 0.35f);
         private static readonly Color RoundaboutColor = new Color(0.7f, 0.35f, 1f);
+        private static readonly Color DistrictColor = new Color(0.4f, 0.55f, 0.95f);
+        private static readonly Color HighwayDeckColor = new Color(0.15f, 0.45f, 1f);
+        private static readonly Color HighwayRampColor = new Color(1f, 0.35f, 0.55f);
 
         [SerializeField] private Tilemap tilemap;
         [SerializeField] private TileBase roadTile;
@@ -68,10 +77,21 @@ namespace OpenCity.EditorTools
         [SerializeField] private GameObject roundaboutPrefab;
         [SerializeField] private TileBase coverTile;
 
+        [SerializeField] private bool useHighways = true;
+        [SerializeField] private int highwayClusterDepth = 3;
+        [SerializeField] private float highwayMinSpanFraction = 0.75f;
+        [SerializeField] private int highwayMaxLinks = 4;
+        [SerializeField] private int highwayRampLength = 2;
+        [SerializeField] private int highwayTurnCost = 6;
+        [SerializeField] private bool highwayFollowStreets = true;
+        [SerializeField] private Tilemap highwayTilemap;
+        [SerializeField] private TileBase highwayTile;
+
         [SerializeField] private bool clearCityAreaFirst = true;
 
         [SerializeField] private bool previewVisible = true;
         [SerializeField] private bool showBlocks = true;
+        [SerializeField] private bool showDistricts = true;
 
         // Layout cache, keyed by the exact settings it was built from - the scene preview asks for
         // the layout on every repaint, and a 512-wide city is too big to rebuild that often.
@@ -88,7 +108,49 @@ namespace OpenCity.EditorTools
         private List<RoundaboutPlanner.Placement> cachedRoundabouts;
         private HashSet<Vector2Int> cachedRoundaboutRoadCells;
 
+        // Highway cache, keyed by the layout and roundabout plan it was built on top of (both are
+        // stable object references until their own settings change) plus the highway settings.
+        private CityBspLayout.Layout cachedHighwayLayout;
+        private List<RoundaboutPlanner.Placement> cachedHighwayRoundabouts;
+        private HighwayPlanner.Settings cachedHighwaySettings;
+        private HighwayPlanner.Plan cachedHighwayPlan;
+
+        // What is already inside the city square, for the Generate/Clear buttons. Counting means
+        // reading a block of tiles and scanning the scene for pieces, so it is recomputed only
+        // when the scene, a Tilemap or the square itself changes - not on every GUI event.
+        private bool contentsDirty = true;
+        private Tilemap contentsTilemap;
+        private Tilemap contentsHighwayTilemap;
+        private BoundsInt contentsArea;
+        private CityAreaContents cachedContents;
+
         private Vector2 scrollPosition;
+
+        /// <summary>Everything this tool owns inside the city square.</summary>
+        private readonly struct CityAreaContents
+        {
+            public readonly int RoadTiles;
+            public readonly int HighwayTiles;
+            public readonly int Pieces;
+
+            public CityAreaContents(int roadTiles, int highwayTiles, int pieces)
+            {
+                RoadTiles = roadTiles;
+                HighwayTiles = highwayTiles;
+                Pieces = pieces;
+            }
+
+            public bool IsEmpty => RoadTiles == 0 && HighwayTiles == 0 && Pieces == 0;
+
+            public string Describe()
+            {
+                var parts = new List<string>();
+                if (RoadTiles > 0) parts.Add($"{RoadTiles} street tile(s)");
+                if (HighwayTiles > 0) parts.Add($"{HighwayTiles} highway tile(s)");
+                if (Pieces > 0) parts.Add($"{Pieces} roundabout/multi-cell piece(s)");
+                return parts.Count == 0 ? "nothing" : string.Join(", ", parts);
+            }
+        }
 
         [InitializeOnLoadMethod]
         private static void RegisterUndoRefresh()
@@ -138,22 +200,70 @@ namespace OpenCity.EditorTools
             {
                 roundaboutPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(DefaultRoundaboutPath);
             }
+            if (highwayTile == null)
+            {
+                highwayTile = AssetDatabase.LoadAssetAtPath<TileBase>(HighwayBuilder.TilePath);
+            }
             SceneView.duringSceneGui += OnSceneGUI;
+            EditorApplication.hierarchyChanged += OnSceneContentsChanged;
+            Undo.undoRedoPerformed += OnSceneContentsChanged;
+            Tilemap.tilemapTileChanged += OnTilemapTileChanged;
+            contentsDirty = true;
         }
 
         private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
+            EditorApplication.hierarchyChanged -= OnSceneContentsChanged;
+            Undo.undoRedoPerformed -= OnSceneContentsChanged;
+            Tilemap.tilemapTileChanged -= OnTilemapTileChanged;
         }
+
+        private void OnSceneContentsChanged()
+        {
+            contentsDirty = true;
+            Repaint();
+        }
+
+        private void OnTilemapTileChanged(Tilemap changed, Tilemap.SyncTile[] tiles)
+        {
+            if (tilemap != null && (changed == tilemap || changed == FindHighwayTilemap()))
+            {
+                OnSceneContentsChanged();
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // GUI
+        // ---------------------------------------------------------------
 
         private void OnGUI()
         {
             EditorGUI.BeginChangeCheck();
 
             // Begin/End rather than a ScrollViewScope: the scrolled region is everything except
-            // the Generate/Clear row below, which stays pinned to the bottom of the window.
+            // the action bar below, which stays pinned to the bottom of the window.
             scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
+            DrawTargetSection();
+            DrawCitySection();
+            DrawBspSection();
+            DrawVarietySection();
+            DrawHighwaySection();
+            EditorGUILayout.Space();
+            DrawPreviewControls();
+            DrawPreview();
+            EditorGUILayout.EndScrollView();
 
+            if (EditorGUI.EndChangeCheck())
+            {
+                SceneView.RepaintAll();
+            }
+
+            DrawActionBar();
+        }
+
+        private void DrawTargetSection()
+        {
             EditorGUILayout.LabelField("Target", EditorStyles.boldLabel);
             tilemap = (Tilemap)EditorGUILayout.ObjectField(new GUIContent(
                 "Tilemap",
@@ -179,7 +289,10 @@ namespace OpenCity.EditorTools
                 "Road Tile",
                 "The tile painted on every road cell. Defaults to Assets/Tiles/New Rule Tile.asset, the " +
                 "road RuleTile that spawns the matching road prefab per cell."), roadTile, typeof(TileBase), false);
+        }
 
+        private void DrawCitySection()
+        {
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("City", EditorStyles.boldLabel);
             sideLength = Mathf.Clamp(EditorGUILayout.IntField(new GUIContent(
@@ -195,7 +308,10 @@ namespace OpenCity.EditorTools
                 "On: the city's outermost ring of cells is a road and BSP partitions the interior - no " +
                 "dead ends anywhere. Off: BSP partitions the whole square and streets stop at the city " +
                 "edge as dead ends (useful when something else will connect to them)."), perimeterRoad);
+        }
 
+        private void DrawBspSection()
+        {
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("BSP", EditorStyles.boldLabel);
             maxSplitDepth = Mathf.Max(0, EditorGUILayout.IntField(new GUIContent(
@@ -235,7 +351,10 @@ namespace OpenCity.EditorTools
                     GUI.changed = true;
                 }
             }
+        }
 
+        private void DrawVarietySection()
+        {
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Variety", EditorStyles.boldLabel);
             useRoundabouts = EditorGUILayout.Toggle(new GUIContent(
@@ -267,48 +386,173 @@ namespace OpenCity.EditorTools
             {
                 coverTile = (TileBase)EditorGUILayout.ObjectField(new GUIContent(
                     "Cover Tile",
-                    "Painted on the road cells under each roundabout: spawns nothing, but still counts as road " +
-                    "for the road pieces around it. Must be a Road Cover Tile."), coverTile, typeof(TileBase), false);
+                    "Painted on the road cells under each roundabout and at each highway ramp: spawns nothing, but " +
+                    "still counts as road for the pieces around it. Must be a Road Cover Tile."),
+                    coverTile, typeof(TileBase), false);
                 if (coverTile == null && GUILayout.Button("Create", GUILayout.Width(60)))
                 {
                     CreateCoverTile();
                 }
             }
+        }
 
+        private void DrawHighwaySection()
+        {
             EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Painting", EditorStyles.boldLabel);
-            clearCityAreaFirst = EditorGUILayout.Toggle(new GUIContent(
-                "Clear City Area First",
-                "Erase every tile (and every roundabout) inside the city square before painting, so " +
-                "regenerating replaces the previous layout. Off: roads are painted over whatever is already there."),
-                clearCityAreaFirst);
-
-            EditorGUILayout.Space();
-            DrawPreviewControls();
-            DrawPreview();
-
-            EditorGUILayout.EndScrollView();
-
-            if (EditorGUI.EndChangeCheck())
+            EditorGUILayout.LabelField("Highways", EditorStyles.boldLabel);
+            useHighways = EditorGUILayout.Toggle(new GUIContent(
+                "Highways",
+                "Lay an elevated highway network over the city, linking the BSP clusters that are far " +
+                "enough apart to be worth a direct route. It is painted with the Highway Tile on its own " +
+                "Tilemap layer and runs either right on top of a street or well clear of one - never " +
+                "alongside it - so the street grid underneath is untouched."), useHighways);
+            using (new EditorGUI.DisabledScope(!useHighways))
             {
-                SceneView.RepaintAll();
+                highwayClusterDepth = Mathf.Clamp(EditorGUILayout.IntSlider(new GUIContent(
+                    $"Cluster Depth ({GetHighwayPlan().Districts.Count} clusters)",
+                    "How deep into the BSP tree the city is cut into clusters: depth 1 gives the two halves " +
+                    "of the first split, depth 3 up to eight districts. A region that stopped splitting earlier " +
+                    "counts as one cluster whatever its depth."), highwayClusterDepth, 0, 8), 0, 8);
+                highwayMinSpanFraction = EditorGUILayout.Slider(new GUIContent(
+                    $"Min Link Span ({HighwayMinSpan()} cells)",
+                    "How far apart two clusters' ramps must be, as a fraction of the city's side length and " +
+                    "measured in cells travelled (Manhattan), before a highway between them is worth building. " +
+                    "This is what makes the network link only the FAR clusters - neighbouring ones already have " +
+                    "streets. Higher = fewer, longer highways."), highwayMinSpanFraction, 0.1f, 2f);
+                highwayMaxLinks = Mathf.Max(0, EditorGUILayout.IntField(new GUIContent(
+                    "Max Links",
+                    "Upper bound on how many cluster-to-cluster links are built. The links are taken shortest " +
+                    "first, and only ever when they join two parts of the network that weren't connected yet."),
+                    highwayMaxLinks));
+                highwayRampLength = EditorGUILayout.IntSlider(new GUIContent(
+                    "Ramp Length (cells)",
+                    "1 = the steep one-cell road-slant-high. 2 = the eased two-cell road-slant-curve, which " +
+                    "looks far better but needs two clear block cells beside a street at every cluster."),
+                    highwayRampLength, HighwayPlanner.MinRampLength, HighwayPlanner.MaxRampLength);
+                highwayTurnCost = Mathf.Max(0, EditorGUILayout.IntField(new GUIContent(
+                    "Turn Cost (cells)",
+                    "What one change of direction costs the router, expressed in cells of detour it is worth " +
+                    "avoiding. High = long straight viaducts that would rather go around; 0 = the shortest " +
+                    "path whatever it looks like."), highwayTurnCost));
+                highwayFollowStreets = EditorGUILayout.Toggle(new GUIContent(
+                    "Follow Streets",
+                    "On: a step on top of a street costs the router half a step, so the highway rides above " +
+                    "the street grid wherever it can, like an expressway built over an avenue. Off: it takes " +
+                    "whichever legal corridor is shortest, over streets or across the blocks."), highwayFollowStreets);
+                highwayTilemap = (Tilemap)EditorGUILayout.ObjectField(new GUIContent(
+                    "Highway Tilemap",
+                    "The separate Tilemap layer the highway is painted on - a sibling of the street Tilemap in " +
+                    "the same Grid. Leave empty to have Generate find or create one called 'Highways'."),
+                    highwayTilemap, typeof(Tilemap), true);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    highwayTile = (TileBase)EditorGUILayout.ObjectField(new GUIContent(
+                        "Highway Tile",
+                        "The highway RuleTile painted on every deck cell and ramp foot. Its pieces already stand " +
+                        "at deck height: road-bridge for straights, a road piece on columns for turns and " +
+                        "junctions, and the slant pieces for ramps. Click Create (or Rebuild) to generate it and " +
+                        "its pieces from the Highway kit."), highwayTile, typeof(TileBase), false);
+                    if (GUILayout.Button(highwayTile == null ? "Create" : "Rebuild", GUILayout.Width(60)))
+                    {
+                        CreateHighwayTile();
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// The pinned bottom bar: what Generate will do, why it can't (right here rather than
+        /// scrolled away in the preview), the Clear-first option that decides whether Generate
+        /// replaces the old city, and the two buttons - each labelled for what it will actually do.
+        /// </summary>
+        private void DrawActionBar()
+        {
+            EditorGUILayout.Space(4);
+            Rect separator = EditorGUILayout.GetControlRect(false, 1f);
+            EditorGUI.DrawRect(separator, new Color(0f, 0f, 0f, 0.3f));
+
+            bool canGenerate = CanGenerate(out string generateError);
+            CityAreaContents contents = GetCityAreaContents();
+
+            if (!canGenerate)
+            {
+                EditorGUILayout.HelpBox(generateError, MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.LabelField(DescribeGeneration(), EditorStyles.wordWrappedMiniLabel);
             }
 
-            EditorGUILayout.Space();
+            using (new EditorGUI.DisabledScope(tilemap == null))
+            {
+                clearCityAreaFirst = EditorGUILayout.ToggleLeft(new GUIContent(
+                    contents.IsEmpty || !clearCityAreaFirst
+                        ? "Clear City Area First"
+                        : $"Clear City Area First (replaces {contents.Describe()})",
+                    "Erase every tile on both Tilemaps, and every roundabout, inside the city square before painting, " +
+                    "so regenerating replaces the previous city. Off: roads are painted over whatever is already there."),
+                    clearCityAreaFirst);
+            }
+
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUI.enabled = CanGenerate(out _);
-                if (GUILayout.Button("Generate", GUILayout.Height(30)))
+                bool regenerate = clearCityAreaFirst && !contents.IsEmpty;
+                using (new EditorGUI.DisabledScope(!canGenerate))
                 {
-                    Generate();
+                    var generateContent = new GUIContent(
+                        regenerate ? "Regenerate" : "Generate",
+                        canGenerate
+                            ? (regenerate
+                                ? "Replace the city already in this square with the current layout. One Undo step."
+                                : "Paint the current layout into the city square. One Undo step.")
+                            : generateError);
+                    if (GUILayout.Button(generateContent, GUILayout.Height(30)))
+                    {
+                        Generate();
+                        GUIUtility.ExitGUI();
+                    }
                 }
-                GUI.enabled = tilemap != null;
-                if (GUILayout.Button("Clear City Area", GUILayout.Height(30), GUILayout.Width(120)))
+                using (new EditorGUI.DisabledScope(tilemap == null || contents.IsEmpty))
                 {
-                    Clear();
+                    var clearContent = new GUIContent(
+                        contents.IsEmpty ? "Clear City Area" : $"Clear City Area ({Total(contents)})",
+                        tilemap == null
+                            ? "Assign a Tilemap first."
+                            : contents.IsEmpty
+                                ? "Nothing to clear - the city square is already empty on both Tilemaps."
+                                : $"Erase {contents.Describe()} inside the {sideLength}x{sideLength} square at cell " +
+                                  $"{originCell}. One Undo step.");
+                    if (GUILayout.Button(clearContent, GUILayout.Height(30), GUILayout.Width(150)))
+                    {
+                        Clear(contents);
+                        GUIUtility.ExitGUI();
+                    }
                 }
-                GUI.enabled = true;
             }
+            EditorGUILayout.Space(2);
+        }
+
+        private static int Total(CityAreaContents contents)
+        {
+            return contents.RoadTiles + contents.HighwayTiles + contents.Pieces;
+        }
+
+        /// <summary>One line saying what Generate will paint, for the action bar.</summary>
+        private string DescribeGeneration()
+        {
+            CityBspLayout.Layout layout = GetLayout();
+            List<RoundaboutPlanner.Placement> roundabouts = GetRoundaboutPlan();
+            HighwayPlanner.Plan highways = GetHighwayPlan();
+            string text = $"{layout.SideLength}x{layout.SideLength} city at cell {originCell}: " +
+                          $"{layout.RoadCells.Count} street cell(s), {roundabouts.Count} roundabout(s)";
+            if (useHighways)
+            {
+                text += highways.Links.Count > 0
+                    ? $", {highways.Links.Count} highway link(s) ({highways.DeckCells.Count} deck cells, " +
+                      $"{highways.Ramps.Count} ramps)"
+                    : ", no highways";
+            }
+            return text + ".";
         }
 
         private void DrawPreviewControls()
@@ -322,19 +566,18 @@ namespace OpenCity.EditorTools
                 showBlocks = EditorGUILayout.ToggleLeft(new GUIContent(
                     "Show Blocks", "Also outline each city block (the leaf regions between roads)."),
                     showBlocks, GUILayout.Width(120));
+                showDistricts = EditorGUILayout.ToggleLeft(new GUIContent(
+                    "Show Clusters", "Also outline the BSP clusters the highways link."),
+                    showDistricts, GUILayout.Width(120));
             }
             EditorGUILayout.HelpBox(
                 "Scene view: white = city boundary, green = blocks, gray = straight, yellow = bend, " +
-                "orange = T-junction, cyan = 4-way, red = dead-end, purple = 3x3 roundabout.", MessageType.None);
+                "orange = T-junction, cyan = 4-way, red = dead-end, purple = 3x3 roundabout, " +
+                "blue outline = cluster, blue = highway deck, pink = ramp.", MessageType.None);
         }
 
         private void DrawPreview()
         {
-            if (!CanGenerate(out string error))
-            {
-                EditorGUILayout.HelpBox(error, MessageType.Warning);
-            }
-
             CityBspLayout.Layout layout = GetLayout();
             List<RoundaboutPlanner.Placement> roundabouts = GetRoundaboutPlan();
             RoadGridPlacer.CountByCategory(layout.RoadCells, cachedGraph, out int[] counts, out int skipped);
@@ -369,6 +612,13 @@ namespace OpenCity.EditorTools
             {
                 message += $"\n{skipped} road cell(s) have no matching road shape.";
             }
+            HighwayPlanner.Plan highways = GetHighwayPlan();
+            message += $"\nClusters (BSP depth {highwayClusterDepth}): {highways.Districts.Count}";
+            if (useHighways)
+            {
+                message += $"   Highways: {highways.Links.Count} link(s), {highways.DeckCells.Count} deck cell(s) " +
+                           $"({highways.BridgeCells} on top of a street), {highways.Ramps.Count} ramp(s)";
+            }
             EditorGUILayout.HelpBox(message, MessageType.None);
 
             if (layout.Cuts.Count == 0)
@@ -386,6 +636,50 @@ namespace OpenCity.EditorTools
             if (useRoundabouts && !CanPlaceRoundabouts(out string roundaboutProblem))
             {
                 EditorGUILayout.HelpBox("Roundabouts are off: " + roundaboutProblem, MessageType.Info);
+            }
+            if (useHighways && !CanPlaceHighways(out string highwayProblem))
+            {
+                EditorGUILayout.HelpBox("Highways are off: " + highwayProblem, MessageType.Info);
+            }
+            else if (useHighways)
+            {
+                if (highways.Links.Count == 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        highways.Districts.Count < 2
+                            ? "No highways: the city is one cluster at this Cluster Depth. Raise Cluster Depth."
+                            : $"No highways: no two clusters' ramps are {HighwayMinSpan()} cells apart, or none of " +
+                              "them could be routed. Lower Min Link Span, or raise Side Length.", MessageType.Info);
+                }
+                if (highways.DistrictsWithoutHub > 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"{highways.DistrictsWithoutHub} cluster(s) have nowhere to put a ramp: no street in them has " +
+                        $"{highwayRampLength} free block cell(s) beside it, clear of other roads and junctions. They " +
+                        "are reached over the street grid instead. Lower Ramp Length, or raise Min Block Size.",
+                        MessageType.Info);
+                }
+                if (highways.UnroutableLinks > 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"{highways.UnroutableLinks} link(s) had no legal corridor and were dropped - every route " +
+                        "between those clusters would have had to run alongside a street. Reroll, or lower Turn Cost.",
+                        MessageType.Info);
+                }
+                if (highwayTile != null && !(highwayTile is HighwayRuleTile))
+                {
+                    EditorGUILayout.HelpBox(
+                        "Highway Tile is not a Highway Rule Tile, so the painted cells won't turn into bridges, " +
+                        "elevated junctions and ramps by themselves. Click Rebuild to generate the proper tile.",
+                        MessageType.Warning);
+                }
+                if (highways.Links.Count > 0 && !CanPaintRampTiles())
+                {
+                    EditorGUILayout.HelpBox(
+                        "The ramps will be built, but their cover tiles can't be painted (Cover Tile must be a Road " +
+                        "Cover Tile and Road Tile a RoadRuleTile), so the streets they land on won't turn into " +
+                        "interchanges - each ramp will just meet a straight road.", MessageType.Warning);
+                }
             }
             if (tilemap != null)
             {
@@ -533,6 +827,93 @@ namespace OpenCity.EditorTools
             return cachedRoundabouts;
         }
 
+        /// <summary>Min Link Span as a cell count for the current Side Length.</summary>
+        private int HighwayMinSpan()
+        {
+            return Mathf.Max(1, Mathf.CeilToInt(highwayMinSpanFraction * sideLength - 0.0001f));
+        }
+
+        /// <summary>Whether highways can be built with the current fields; says why not otherwise.</summary>
+        private bool CanPlaceHighways(out string reason)
+        {
+            if (!useHighways)
+            {
+                reason = "Highways is unticked.";
+                return false;
+            }
+            if (highwayTile == null)
+            {
+                reason = "assign a Highway Tile (or click Create).";
+                return false;
+            }
+            if (highwayRampLength >= 2 && !(coverTile is RoadCoverTile))
+            {
+                reason = "a two-cell ramp's top cell is painted with the Cover Tile - assign a Road Cover Tile, or set " +
+                         "Ramp Length to 1.";
+                return false;
+            }
+            if (highwayTilemap != null && highwayTilemap == tilemap)
+            {
+                reason = "Highway Tilemap is the street Tilemap - the highway needs its own layer. Clear the field " +
+                         "to have one created.";
+                return false;
+            }
+            if (highwayTilemap == null && tilemap != null && tilemap.transform.parent == null)
+            {
+                reason = "the street Tilemap has no parent Grid to add a Highways layer to - assign a Highway Tilemap.";
+                return false;
+            }
+            reason = null;
+            return true;
+        }
+
+        /// <summary>
+        /// The highway plan for the current layout - empty when highways are off or can't be painted. Shared by the preview and Generate, like the layout and roundabouts, so the
+        /// Scene view is never showing something other than what will be built.
+        /// </summary>
+        private HighwayPlanner.Plan GetHighwayPlan()
+        {
+            CityBspLayout.Layout layout = GetLayout();
+            List<RoundaboutPlanner.Placement> roundabouts = GetRoundaboutPlan();
+            var settings = new HighwayPlanner.Settings(
+                highwayClusterDepth, HighwayMinSpan(),
+                CanPlaceHighways(out _) ? highwayMaxLinks : 0,
+                highwayRampLength, highwayTurnCost, highwayFollowStreets);
+            if (cachedHighwayPlan == null || cachedHighwayLayout != layout ||
+                !ReferenceEquals(cachedHighwayRoundabouts, roundabouts) || !cachedHighwaySettings.Equals(settings))
+            {
+                // A roundabout owns all nine of its cells: a highway support or ramp there would land
+                // inside the roundabout, so the deck goes round it.
+                var reserved = new HashSet<Vector2Int>();
+                foreach (RoundaboutPlanner.Placement roundabout in roundabouts)
+                {
+                    RectInt footprint = roundabout.Footprint;
+                    for (int x = footprint.xMin; x < footprint.xMax; x++)
+                    {
+                        for (int y = footprint.yMin; y < footprint.yMax; y++)
+                        {
+                            reserved.Add(new Vector2Int(x, y));
+                        }
+                    }
+                }
+                cachedHighwayLayout = layout;
+                cachedHighwayRoundabouts = roundabouts;
+                cachedHighwaySettings = settings;
+                cachedHighwayPlan = HighwayPlanner.Build(layout, reserved, settings);
+            }
+            return cachedHighwayPlan;
+        }
+
+        /// <summary>
+        /// Whether the ramps' cover tiles can be painted. Without them the ramp still stands, but
+        /// the street it lands beside never notices, so it stays a straight instead of becoming the
+        /// interchange's T-junction.
+        /// </summary>
+        private bool CanPaintRampTiles()
+        {
+            return coverTile is RoadCoverTile && roadTile is RoadRuleTile;
+        }
+
         private void UseSelection()
         {
             GameObject go = Selection.activeGameObject;
@@ -571,10 +952,76 @@ namespace OpenCity.EditorTools
             tilemapGo.AddComponent<TilemapRenderer>();
 
             tilemap = tm;
+            highwayTilemap = CreateHighwayTilemap(gridGo.transform, CreateTilemapUndoLabel);
             Selection.activeGameObject = tilemapGo;
             Repaint();
             SceneView.RepaintAll();
-            Debug.Log($"[{LogPrefix}] Created '{gridGo.name}/{tilemapGo.name}' (Cell Swizzle XZY, cell size {newTilemapCellSize:0.###}).");
+            Debug.Log($"[{LogPrefix}] Created '{gridGo.name}/{tilemapGo.name}' and '{gridGo.name}/{highwayTilemap.name}' " +
+                      $"(Cell Swizzle XZY, cell size {newTilemapCellSize:0.###}).");
+        }
+
+        private static Tilemap CreateHighwayTilemap(Transform grid, string undoLabel)
+        {
+            var go = new GameObject(HighwayTilemapName);
+            Undo.RegisterCreatedObjectUndo(go, undoLabel);
+            go.transform.SetParent(grid, false);
+            Tilemap tm = go.AddComponent<Tilemap>();
+            TilemapRenderer renderer = go.AddComponent<TilemapRenderer>();
+            renderer.sortingOrder = 1;
+            return tm;
+        }
+
+        /// <summary>
+        /// The highway's own Tilemap layer if there is one: the assigned one, else a sibling of the
+        /// street Tilemap called 'Highways'. Never the street Tilemap itself. Creates nothing, so the
+        /// GUI and Clear can use it freely.
+        /// </summary>
+        private Tilemap FindHighwayTilemap()
+        {
+            if (tilemap == null)
+            {
+                return null;
+            }
+            if (highwayTilemap != null)
+            {
+                return highwayTilemap != tilemap ? highwayTilemap : null;
+            }
+            Transform grid = tilemap.transform.parent;
+            Transform existing = grid != null ? grid.Find(HighwayTilemapName) : null;
+            Tilemap found = existing != null ? existing.GetComponent<Tilemap>() : null;
+            return found != tilemap ? found : null;
+        }
+
+        /// <summary>
+        /// <see cref="FindHighwayTilemap"/>, or a new 'Highways' Tilemap in the street Tilemap's Grid,
+        /// remembered in the Highway Tilemap field. Its tile pieces carry their own height, so it sits
+        /// on the same ground plane as the streets. Null only if the street Tilemap has no Grid parent.
+        /// </summary>
+        private Tilemap GetOrCreateHighwayTilemap(string undoLabel)
+        {
+            Tilemap layer = FindHighwayTilemap();
+            if (layer == null && tilemap.transform.parent != null)
+            {
+                layer = CreateHighwayTilemap(tilemap.transform.parent, undoLabel);
+            }
+            highwayTilemap = layer;
+            return layer;
+        }
+
+        private void CreateHighwayTile()
+        {
+            HighwayRuleTile tile = HighwayBuilder.CreateOrUpdateTile(out string error);
+            if (tile == null)
+            {
+                Debug.LogError($"[{LogPrefix}] Couldn't create the Highway Tile: {error}");
+                return;
+            }
+            highwayTile = tile;
+            if (highwayTilemap != null)
+            {
+                highwayTilemap.RefreshAllTiles();
+            }
+            Repaint();
         }
 
         private void CreateCoverTile()
@@ -591,9 +1038,9 @@ namespace OpenCity.EditorTools
             Repaint();
         }
 
-        private BoundsInt CityArea(int side)
+        private BoundsInt CityArea()
         {
-            return new BoundsInt(originCell.x, originCell.y, 0, side, side, 1);
+            return new BoundsInt(originCell.x, originCell.y, 0, sideLength, sideLength, 1);
         }
 
         private Vector3Int ToTilemapCell(Vector2Int cityCell)
@@ -601,40 +1048,95 @@ namespace OpenCity.EditorTools
             return new Vector3Int(originCell.x + cityCell.x, originCell.y + cityCell.y, 0);
         }
 
-        /// <summary>Erases every tile in the city square. Returns how many tiles were there.</summary>
-        private int ClearCityArea(int side)
+        /// <summary>
+        /// What this tool already has inside the city square - street tiles, highway tiles and
+        /// multi-cell pieces. Cached until the scene, one of the Tilemaps or the square changes.
+        /// </summary>
+        private CityAreaContents GetCityAreaContents()
         {
-            BoundsInt area = CityArea(side);
-            TileBase[] existing = tilemap.GetTilesBlock(area);
+            if (tilemap == null)
+            {
+                return default;
+            }
+            Tilemap highwayLayer = FindHighwayTilemap();
+            BoundsInt area = CityArea();
+            if (contentsDirty || contentsTilemap != tilemap || contentsHighwayTilemap != highwayLayer ||
+                contentsArea != area)
+            {
+                contentsTilemap = tilemap;
+                contentsHighwayTilemap = highwayLayer;
+                contentsArea = area;
+                cachedContents = new CityAreaContents(
+                    CountTiles(tilemap, area),
+                    highwayLayer != null ? CountTiles(highwayLayer, area) : 0,
+                    FindPiecesInCityArea(area).Count);
+                contentsDirty = false;
+            }
+            return cachedContents;
+        }
+
+        private static int CountTiles(Tilemap target, BoundsInt area)
+        {
+            BoundsInt used = target.cellBounds;
+            if (used.xMax <= area.xMin || area.xMax <= used.xMin || used.yMax <= area.yMin || area.yMax <= used.yMin)
+            {
+                return 0; // nothing painted anywhere near the square - skip reading the block
+            }
             int count = 0;
-            foreach (TileBase tile in existing)
+            foreach (TileBase tile in target.GetTilesBlock(area))
             {
                 if (tile != null)
                 {
                     count++;
                 }
             }
+            return count;
+        }
+
+        /// <summary>Erases every tile of <paramref name="target"/> in the city square. Returns how many tiles were there.</summary>
+        private static int ClearTiles(Tilemap target, BoundsInt area)
+        {
+            int count = CountTiles(target, area);
             if (count > 0)
             {
-                tilemap.SetTilesBlock(area, new TileBase[existing.Length]);
+                target.SetTilesBlock(area, new TileBase[area.size.x * area.size.y * area.size.z]);
+                EditorUtility.SetDirty(target);
             }
             return count;
         }
 
-        /// <summary>Destroys (undoably) every multi-cell piece on this Tilemap that covers any cell of the city square.</summary>
-        private int RemovePiecesInCityArea(int side)
+        /// <summary>
+        /// Every multi-cell piece on the street Tilemap covering any cell of the square: the
+        /// roundabouts, plus highway prefabs left by the older prefab-based highway builder.
+        /// </summary>
+        private List<MultiCellRoadPiece> FindPiecesInCityArea(BoundsInt area)
         {
-            BoundsInt area = CityArea(side);
-            int removed = 0;
+            var pieces = new List<MultiCellRoadPiece>();
             foreach (MultiCellRoadPiece piece in FindObjectsByType<MultiCellRoadPiece>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (piece.tilemap == tilemap && piece.Overlaps(area))
                 {
-                    Undo.DestroyObjectImmediate(piece.gameObject);
-                    removed++;
+                    pieces.Add(piece);
                 }
             }
-            return removed;
+            return pieces;
+        }
+
+        /// <summary>
+        /// Erases the city square on both Tilemaps and destroys its pieces, inside the caller's undo
+        /// group. <paramref name="highwayLayer"/> must already be registered for undo if not null.
+        /// </summary>
+        private CityAreaContents ClearCityArea(Tilemap highwayLayer)
+        {
+            BoundsInt area = CityArea();
+            int roadTiles = ClearTiles(tilemap, area);
+            int highwayTiles = highwayLayer != null ? ClearTiles(highwayLayer, area) : 0;
+            List<MultiCellRoadPiece> pieces = FindPiecesInCityArea(area);
+            foreach (MultiCellRoadPiece piece in pieces)
+            {
+                Undo.DestroyObjectImmediate(piece.gameObject);
+            }
+            return new CityAreaContents(roadTiles, highwayTiles, pieces.Count);
         }
 
         /// <summary>The GameObject the multi-cell pieces are parented under: a sibling of the Tilemap inside its Grid.</summary>
@@ -688,6 +1190,17 @@ namespace OpenCity.EditorTools
             marker.cells = new BoundsInt(originCell.x + footprint.x, originCell.y + footprint.y, 0, 3, 3, 1);
         }
 
+        private static int BeginUndoGroup(string label)
+        {
+            Undo.IncrementCurrentGroup();
+            Undo.SetCurrentGroupName(label);
+            return Undo.GetCurrentGroup();
+        }
+
+        /// <summary>
+        /// Paints the current plan - streets, roundabouts, ramp interchanges and highways - as one
+        /// Undo step. Everything painted is read from the same caches the Scene preview draws.
+        /// </summary>
         private void Generate()
         {
             if (!CanGenerate(out string error))
@@ -698,20 +1211,57 @@ namespace OpenCity.EditorTools
 
             CityBspLayout.Layout layout = GetLayout();
             List<RoundaboutPlanner.Placement> roundabouts = GetRoundaboutPlan();
+            HighwayPlanner.Plan highways = GetHighwayPlan();
 
-            Undo.IncrementCurrentGroup();
-            int undoGroup = Undo.GetCurrentGroup();
-            Undo.SetCurrentGroupName(UndoLabel);
+            int undoGroup = BeginUndoGroup(UndoLabel);
             Undo.RegisterCompleteObjectUndo(tilemap, UndoLabel);
-
-            int cleared = 0;
-            int removedPieces = 0;
-            if (clearCityAreaFirst)
+            Tilemap highwayLayer = highways.Links.Count > 0 ? GetOrCreateHighwayTilemap(UndoLabel) : FindHighwayTilemap();
+            if (highwayLayer != null)
             {
-                cleared = ClearCityArea(layout.SideLength);
-                removedPieces = RemovePiecesInCityArea(layout.SideLength);
+                Undo.RegisterCompleteObjectUndo(highwayLayer, UndoLabel);
             }
 
+            CityAreaContents cleared = clearCityAreaFirst ? ClearCityArea(highwayLayer) : default;
+            PaintStreets(layout);
+            int interchanges = PaintRampInterchanges(highways);
+            if (roundabouts.Count > 0)
+            {
+                Transform root = GetOrCreatePiecesRoot(UndoLabel);
+                foreach (RoundaboutPlanner.Placement roundabout in roundabouts)
+                {
+                    PlaceRoundabout(roundabout, root);
+                }
+            }
+            HighwayBuilder.Result highwayResult = highways.Links.Count > 0
+                ? HighwayBuilder.Paint(highways, highwayLayer, originCell, highwayTile, coverTile)
+                : default;
+
+            Undo.CollapseUndoOperations(undoGroup);
+            contentsDirty = true;
+
+            RoadGridPlacer.CountByCategory(layout.RoadCells, cachedGraph, out int[] counts, out _);
+            Debug.Log($"[{LogPrefix}] Painted {layout.RoadCellsSorted.Count} road cell(s) onto '{tilemap.name}' for a " +
+                      $"{layout.SideLength}x{layout.SideLength} city at cell {originCell} ({layout.Cuts.Count} cut(s), " +
+                      $"{layout.Blocks.Count} block(s), T-junction {counts[(int)RoadGridPlacer.ShapeCategory.TJunction]}, " +
+                      $"4-way {counts[(int)RoadGridPlacer.ShapeCategory.FourWay] - roundabouts.Count}, roundabout {roundabouts.Count}, " +
+                      $"seed {randomSeed}" + (cleared.IsEmpty ? "" : $"; replaced {cleared.Describe()}") + ").");
+            if (highways.Links.Count > 0)
+            {
+                Debug.Log($"[{LogPrefix}] Painted {highways.Links.Count} highway link(s) over {highways.Districts.Count} " +
+                          $"cluster(s) at BSP depth {highwayClusterDepth} onto '{highwayLayer.name}': " +
+                          $"{highwayResult.DeckTiles} deck tile(s) ({highways.BridgeCells} on top of a street), " +
+                          $"{highways.Ramps.Count} ramp(s) in {highwayResult.RampTiles} tile(s), " +
+                          $"{interchanges} street interchange cover tile(s)" +
+                          (highways.UnroutableLinks > 0 ? $", {highways.UnroutableLinks} link(s) unroutable" : "") + ".");
+            }
+            ShowNotification(new GUIContent(
+                $"{(cleared.IsEmpty ? "Generated" : "Regenerated")} {layout.SideLength}x{layout.SideLength} city" +
+                (highways.Links.Count > 0 ? $"\n{highways.Links.Count} highway link(s)" : "")), 1.5);
+        }
+
+        /// <summary>Road Tile on every street cell, Cover Tile on the cells under a roundabout, in one batch.</summary>
+        private void PaintStreets(CityBspLayout.Layout layout)
+        {
             var positions = new Vector3Int[layout.RoadCellsSorted.Count];
             var tiles = new TileBase[positions.Length];
             for (int i = 0; i < positions.Length; i++)
@@ -722,43 +1272,64 @@ namespace OpenCity.EditorTools
             }
             tilemap.SetTiles(positions, tiles);
             EditorUtility.SetDirty(tilemap);
-
-            if (roundabouts.Count > 0)
-            {
-                Transform root = GetOrCreatePiecesRoot(UndoLabel);
-                foreach (RoundaboutPlanner.Placement roundabout in roundabouts)
-                {
-                    PlaceRoundabout(roundabout, root);
-                }
-            }
-
-            Undo.CollapseUndoOperations(undoGroup);
-
-            RoadGridPlacer.CountByCategory(layout.RoadCells, cachedGraph, out int[] counts, out _);
-            Debug.Log($"[{LogPrefix}] Painted {positions.Length} road cell(s) onto '{tilemap.name}' for a " +
-                      $"{layout.SideLength}x{layout.SideLength} city at cell {originCell} ({layout.Cuts.Count} cut(s), " +
-                      $"{layout.Blocks.Count} block(s), T-junction {counts[(int)RoadGridPlacer.ShapeCategory.TJunction]}, " +
-                      $"4-way {counts[(int)RoadGridPlacer.ShapeCategory.FourWay] - roundabouts.Count}, roundabout {roundabouts.Count}, seed {randomSeed}" +
-                      (cleared > 0 ? $", {cleared} old tile(s) cleared" : "") +
-                      (removedPieces > 0 ? $", {removedPieces} old multi-cell piece(s) removed" : "") + ").");
         }
 
-        private void Clear()
+        /// <summary>
+        /// A ramp stands on block cells, so it is painted on the street layer separately - and only
+        /// its bottom cell is. The cover tile shows nothing but reads as road, which is what turns the
+        /// street that cell touches into the interchange's T-junction; painting the rest of the ramp
+        /// would hand the same arm to whatever lies past its top, which the highway passes rather
+        /// than joins. Returns how many were painted.
+        /// </summary>
+        private int PaintRampInterchanges(HighwayPlanner.Plan highways)
         {
-            if (tilemap == null)
+            if (highways.FootCells.Count == 0 || !CanPaintRampTiles())
+            {
+                return 0;
+            }
+            var positions = new Vector3Int[highways.FootCells.Count];
+            var tiles = new TileBase[positions.Length];
+            for (int i = 0; i < positions.Length; i++)
+            {
+                positions[i] = ToTilemapCell(highways.FootCells[i]);
+                tiles[i] = coverTile;
+            }
+            tilemap.SetTiles(positions, tiles);
+            return positions.Length;
+        }
+
+        /// <summary>
+        /// Erases the city square on both layers after a confirmation that says exactly what goes.
+        /// The dialog can be opted out of for the session; the clear is undoable either way.
+        /// </summary>
+        private void Clear(CityAreaContents contents)
+        {
+            if (tilemap == null || contents.IsEmpty)
             {
                 return;
             }
-            Undo.IncrementCurrentGroup();
-            int undoGroup = Undo.GetCurrentGroup();
-            Undo.SetCurrentGroupName(ClearUndoLabel);
+            if (!EditorUtility.DisplayDialog(
+                    "Clear City Area",
+                    $"Erase {contents.Describe()} inside the {sideLength}x{sideLength} city square at cell {originCell}?\n\n" +
+                    "Tiles and pieces outside the square are not touched. You can undo this.",
+                    "Clear", "Cancel", DialogOptOutDecisionType.ForThisSession, ClearConfirmOptOutKey))
+            {
+                return;
+            }
+
+            int undoGroup = BeginUndoGroup(ClearUndoLabel);
             Undo.RegisterCompleteObjectUndo(tilemap, ClearUndoLabel);
-            int cleared = ClearCityArea(sideLength);
-            int removedPieces = RemovePiecesInCityArea(sideLength);
-            EditorUtility.SetDirty(tilemap);
+            Tilemap highwayLayer = FindHighwayTilemap();
+            if (highwayLayer != null)
+            {
+                Undo.RegisterCompleteObjectUndo(highwayLayer, ClearUndoLabel);
+            }
+            CityAreaContents cleared = ClearCityArea(highwayLayer);
             Undo.CollapseUndoOperations(undoGroup);
-            Debug.Log($"[{LogPrefix}] Cleared {cleared} tile(s) and {removedPieces} multi-cell piece(s) from the " +
-                      $"{sideLength}x{sideLength} city area at cell {originCell}.");
+            contentsDirty = true;
+
+            Debug.Log($"[{LogPrefix}] Cleared {cleared.Describe()} from the {sideLength}x{sideLength} city area at cell {originCell}.");
+            ShowNotification(new GUIContent("City area cleared"), 1.5);
         }
 
         // ---------------------------------------------------------------
@@ -774,6 +1345,7 @@ namespace OpenCity.EditorTools
 
             CityBspLayout.Layout layout = GetLayout();
             List<RoundaboutPlanner.Placement> roundabouts = GetRoundaboutPlan();
+            HighwayPlanner.Plan highways = GetHighwayPlan();
             // Lift slightly off the ground so the gizmos don't z-fight with painted road prefabs.
             Vector3 lift = Vector3.up * 0.05f;
 
@@ -794,6 +1366,39 @@ namespace OpenCity.EditorTools
             foreach (RoundaboutPlanner.Placement roundabout in roundabouts)
             {
                 Handles.DrawSolidRectangleWithOutline(CellRectCorners(roundabout.Footprint, lift * 2f), roundaboutFill, RoundaboutColor);
+            }
+
+            if (showDistricts && useHighways)
+            {
+                Handles.color = DistrictColor;
+                foreach (RectInt district in highways.Districts)
+                {
+                    Vector3[] corners = CellRectCorners(district, lift * 2f);
+                    Handles.DrawAAPolyLine(2f, corners[0], corners[1], corners[2], corners[3], corners[0]);
+                }
+            }
+
+            // The highway is drawn at its real height, so the preview reads as the overpass it is.
+            Vector3 deckLift = Vector3.up * (HighwayBuilder.DeckHeight + 0.05f);
+            var deckFill = new Color(HighwayDeckColor.r, HighwayDeckColor.g, HighwayDeckColor.b, 0.5f);
+            foreach (Vector2Int cell in highways.DeckCellsSorted)
+            {
+                Handles.DrawSolidRectangleWithOutline(
+                    CellRectCorners(new RectInt(cell.x, cell.y, 1, 1), deckLift), deckFill, HighwayDeckColor);
+            }
+            var rampFill = new Color(HighwayRampColor.r, HighwayRampColor.g, HighwayRampColor.b, 0.5f);
+            foreach (HighwayPlanner.Ramp ramp in highways.Ramps)
+            {
+                // Each ramp cell is drawn at the height that cell's surface actually reaches, so a
+                // two-cell ramp visibly climbs.
+                for (int i = 0; i < ramp.Length; i++)
+                {
+                    Vector2Int cell = ramp.Foot + ramp.Direction * i;
+                    float t = ramp.Length == 1 ? 0.5f : (i + 0.5f) / ramp.Length;
+                    Handles.DrawSolidRectangleWithOutline(
+                        CellRectCorners(new RectInt(cell.x, cell.y, 1, 1), Vector3.up * (HighwayBuilder.DeckHeight * t + 0.05f)),
+                        rampFill, HighwayRampColor);
+                }
             }
 
             if (layout.RoadCells.Count > PreviewCellLimit)

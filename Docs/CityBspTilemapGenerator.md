@@ -6,11 +6,14 @@ RuleTile (`Assets/Tiles/New Rule Tile.asset`), every painted cell turns into the
 (dead end / straight / bend / T-junction / crossroad) with the right rotation, so one click on
 **Generate** gives you a finished, fully connected street grid made of the Kenney road kit in
 `Assets/Prefabs/Roads`. The large intersections, where two major roads cross, become the kit's
-3×3 `road-roundabout`.
+3×3 `road-roundabout`. On top of that it can lay an **elevated highway network** linking the
+city's far apart districts — see [City Highway Generator](CityHighwayGenerator.md).
 
 - **Script**: `Assets/Editor/CityRoadTilemapWindow.cs`
 - **Layout algorithm**: `Assets/Editor/CityBspLayout.cs` (pure integer-grid BSP, no Editor or
   Tilemap dependency)
+- **Highways**: `Assets/Editor/HighwayPlanner.cs` + `Assets/Editor/HighwayBuilder.cs`, documented
+  separately in [CityHighwayGenerator.md](CityHighwayGenerator.md)
 - **Road tile**: `Assets/Tiles/New Rule Tile.asset`, an `OpenCity.Tiles.RoadRuleTile`
   (`Assets/Scripts/Tiles/RoadRuleTile.cs`)
 - **Namespace**: `OpenCity.EditorTools`
@@ -47,8 +50,10 @@ itself, cell by cell (see [Guarantees](#guarantees)), so that can't happen.
 4. Set **Side Length (cells)**, for example `32`. The white square in the Scene view is the city.
 5. Adjust the **BSP** settings while watching the Scene view. Colored squares show every road
    cell by piece type and green outlines show the blocks. Click **Reroll** until you like the layout.
-6. Click **Generate**. The road cells are painted and the RuleTile spawns a road prefab on each one.
-7. Optional: open `Window > 2D > Tile Palette`, choose **New Tile Palette**, and paint or erase
+6. Optional: scroll to **Highways** (on by default) to add elevated routes between the city's far
+   apart districts — see [CityHighwayGenerator.md](CityHighwayGenerator.md).
+7. Click **Generate**. The road cells are painted and the RuleTile spawns a road prefab on each one.
+8. Optional: open `Window > 2D > Tile Palette`, choose **New Tile Palette**, and paint or erase
    roads by hand. Neighboring pieces update themselves.
 
 **Ctrl+Z** undoes a whole Generate or Clear in one step.
@@ -192,12 +197,15 @@ also the only way a block can end up larger than **Max Block Size** (see [Guaran
 
 **Generate** runs these steps as a single Undo action:
 
-1. If **Clear City Area First** is on, erase every tile inside the city square (and only there;
-   tiles outside it are never touched).
+1. If **Clear City Area First** is on, erase every tile inside the city square, on both the street
+   Tilemap and the Highway Tilemap (and only there; tiles outside it are never touched).
 2. Paint **Road Tile** on every road cell in one `Tilemap.SetTiles` batch, at
    `Origin Cell + city-local cell`. The road cells under a roundabout get the **Cover Tile**
    instead (see [section 6](#6-roundabouts-33-pieces)).
-3. Place the roundabout pieces, if any.
+3. Paint the **Cover Tile** on the bottom cell of every highway ramp, which is what turns the street
+   there into an interchange.
+4. Place the roundabout pieces, if any.
+5. Paint the highway, if any, with the **Highway Tile** on its own **Highway Tilemap** layer.
 
 Turning the rest of the cells into 3D roads is the Road Tile's job (next section).
 
@@ -341,7 +349,7 @@ The layout depends only on **Side Length**, **Perimeter Ring Road**, the six BSP
 |---|---|---|
 | Tilemap | – | The Tilemap to paint on. Its Grid should have **Cell Swizzle = XZY** (the preview warns otherwise). |
 | Use Selected GameObject | – | Takes the Tilemap on (or under) the selected Hierarchy object. |
-| Create City Tilemap | – | Creates `City Road Grid` (Grid, Cell Swizzle XZY) with a child `Roads` Tilemap, and assigns it. Undoable. |
+| Create City Tilemap | – | Creates `City Road Grid` (Grid, Cell Swizzle XZY) with a child `Roads` Tilemap and a child `Highways` Tilemap, and assigns both. Undoable. |
 | New Tilemap Cell Size | `1` | Cell size used by **Create City Tilemap** only. Use your road prefab footprint (1 for this kit). |
 | Road Tile | `New Rule Tile` | Tile painted on every road cell. |
 
@@ -370,12 +378,12 @@ The layout depends only on **Side Length**, **Perimeter Ring Road**, the six BSP
 | Min Crossing Road | `0.5` | What counts as a large intersection: both straight roads through the crossroad must be at least this fraction of the side length. The label shows the result in cells (16 for a 32-cell city). Higher = fewer roundabouts, only where the main avenues cross. |
 | Min Roundabout Spacing | `0.33` | How far apart roundabouts must be, as a fraction of the side length, measured along either axis. The label shows cells (11 for a 32-cell city). Higher = fewer, more spread out. Never less than 3 cells, so pieces can't overlap. |
 | Roundabout Prefab | `Assets/Prefabs/Roads/road-roundabout.prefab` | The 3×3 piece, centered on its pivot, with an exit in the middle of each side. |
-| Cover Tile / Create | `Assets/Tiles/Road Cover Tile.asset` | Painted on the road cells under each roundabout. **Create** makes the asset at that path if it's missing. |
+| Cover Tile / Create | `Assets/Tiles/Road Cover Tile.asset` | Painted on the road cells under each roundabout, on the bottom cell of every highway ramp, and (on the Highway Tilemap) on the top cell of every two-cell ramp. **Create** makes the asset at that path if it's missing. |
 
-### Painting
-| Field | Default | Description |
-|---|---|---|
-| Clear City Area First | on | Erase all tiles, and every roundabout, in the city square before painting, so regenerating replaces the old layout. Off = paint over what's there (old roads and roundabouts stay). |
+### Highways
+Six settings, a Highway Tilemap and a Highway Tile that lay an elevated highway network over the
+finished street grid, on its own Tilemap layer, linking the city's far apart BSP clusters. Documented in full, with its own guarantees and
+troubleshooting, in [CityHighwayGenerator.md](CityHighwayGenerator.md#window-reference).
 
 ### Scene preview
 **Show Preview** draws the layout in the Scene view before you paint, using the Tilemap's own
@@ -391,6 +399,9 @@ The layout depends only on **Side Length**, **Perimeter Ring Road**, the six BSP
 | Cyan | Crossroad (4-way) |
 | Red | Dead end (only with the perimeter off) |
 | Purple 3×3 | A roundabout |
+| Blue outline | A highway cluster (toggle with **Show Clusters**) |
+| Blue, at deck height | A highway deck cell |
+| Pink, at ramp height | A highway ramp cell |
 | Magenta | No matching piece (should never appear) |
 
 Cities with more than 10,000 road cells skip the per-cell squares in the preview to stay fast.
@@ -403,12 +414,18 @@ whole for intersection spacing. Warnings appear for: no interior roads, Max Bloc
 be reached (under 2 × Min Block Size), a Tilemap whose Grid isn't XZY, and a Road Tile that isn't a
 RuleTile.
 
-### Buttons
-- **Generate**: enabled once a Tilemap and Road Tile are set. Clears the city area (if enabled),
-  paints the road cells, and logs a one-line summary. One Undo step.
-- **Clear City Area**: erases every tile and every roundabout inside the current city square
-  (using the current Origin Cell and Side Length). One Undo step. Tiles and roundabouts entirely
-  outside the square are never touched.
+### Action bar
+Pinned to the bottom of the window, outside the scrolling settings, so it is always visible:
+
+| Element | Description |
+|---|---|
+| Summary line | What Generate will paint: city size and origin, street cells, roundabouts, highway links (deck cells and ramps). Replaced by a warning saying what's missing when Generate can't run. |
+| Clear City Area First | Default on. Erase every tile on both the street and Highway Tilemaps, and every roundabout, inside the city square before painting, so regenerating replaces the old city. Its label shows what will be replaced. Off = paint over what's there. |
+| **Generate** / **Regenerate** | Enabled once a Tilemap and Road Tile are set (the tooltip says why not otherwise). Reads **Regenerate** when Clear City Area First is on and the square already has content. Paints streets, roundabouts, ramp interchanges and highways, logs a summary and flashes a notification. One Undo step. |
+| **Clear City Area (n)** | Shows how many tiles and pieces are in the square, and is disabled when there are none. Asks for confirmation, listing exactly what goes (the dialog can be turned off for the session), then erases the square on both Tilemaps and removes its roundabouts and multi-cell pieces. Uses the current Origin Cell and Side Length; anything outside the square is never touched. One Undo step. |
+
+The counts are cached and refreshed only when the scene, either Tilemap, or the square changes, so a
+large city doesn't pay for them on every repaint.
 
 ### Undo / Redo
 Both buttons record the Tilemap before changing it, so **Ctrl+Z** / **Ctrl+Y** step back and
@@ -487,7 +504,8 @@ consider several smaller cities instead.
 - **Connection to roads outside the city depends on the Tilemap.** Neighbors on the same Tilemap
   connect automatically; roads made by the prefab-placing tools (`Road`, `SubRoads` objects) are
   unaware of the city.
-- **Flat ground only.** No height, ramps or bridges.
+- **Flat ground only for the streets.** They have no height, ramps or bridges — that is what the
+  [highway layer](CityHighwayGenerator.md) adds, above them.
 - **Roundabouts live outside the Tilemap.** They are GameObjects placed next to the Tilemap, not
   tiles, so hand-editing with the Tile Palette doesn't move or remove them. The Tilemap Road
   Generator reads only tiles and knows nothing about them. The piece also assumes a Grid cell
@@ -498,8 +516,8 @@ consider several smaller cities instead.
 ## Files touched by this feature
 - `Assets/Editor/CityRoadTilemapWindow.cs`: the tool (UI, Scene preview, Tilemap painting, undo).
 - `Assets/Editor/CityBspLayout.cs`: the integer-grid BSP layout algorithm.
-- `Assets/Editor/RoadGridPlacer.cs`: existing; used only to classify cells by piece type for the
-  preview colors and counts.
+- `Assets/Editor/RoadGridPlacer.cs`: existing; used to classify cells by piece type for the
+  preview colors and counts, and by the highway layer to resolve its own pieces.
 - `Assets/Editor/RoundaboutPlanner.cs`: picks which crossroads become roundabouts.
 - `Assets/Scripts/Tiles/RoadRuleTile.cs` and `Assets/Tiles/New Rule Tile.asset`: the road tile that
   turns painted cells into prefabs (and treats the cover tile as road).
@@ -507,4 +525,6 @@ consider several smaller cities instead.
   tile under each roundabout.
 - `Assets/Scripts/Tiles/MultiCellRoadPiece.cs`: the marker on each roundabout, used to find and
   replace it.
+- `Assets/Editor/HighwayPlanner.cs`, `Assets/Editor/HighwayBuilder.cs`: the elevated highway layer.
 - `Docs/CityBspTilemapGenerator.md`: this document.
+- `Docs/CityHighwayGenerator.md`: the highway layer.
