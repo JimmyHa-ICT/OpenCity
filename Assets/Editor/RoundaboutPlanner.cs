@@ -54,10 +54,13 @@ namespace OpenCity.EditorTools
         /// cells long, taken largest crossing first (then the longer of its two roads, then
         /// position). Each one gets a roundabout if the piece fits and no roundabout already placed
         /// is closer than <paramref name="minSpacing"/> cells along either axis (never less than 3,
-        /// so two pieces can't overlap).
+        /// so two pieces can't overlap). A crossroad whose 3x3 footprint touches any cell of
+        /// <paramref name="elevated"/> (expressway deck and ramps) is skipped: the deck's columns would
+        /// stand inside the roundabout, so that crossing stays a flyover crossing.
         /// </summary>
         public static List<Placement> Plan(
-            HashSet<Vector2Int> roads, IReadOnlyList<Vector2Int> sortedRoads, int minCrossingLength, int minSpacing)
+            HashSet<Vector2Int> roads, IReadOnlyList<Vector2Int> sortedRoads, int minCrossingLength, int minSpacing,
+            HashSet<Vector2Int> elevated = null)
         {
             var placements = new List<Placement>();
             if (roads == null || sortedRoads == null)
@@ -91,13 +94,32 @@ namespace OpenCity.EditorTools
 
             foreach ((Vector2Int center, int shorter, int _) in candidates)
             {
-                if (!Fits(center, roads) || IsTooClose(center, placements, spacing))
+                if (!Fits(center, roads) || IsTooClose(center, placements, spacing) || UnderDeck(center, elevated))
                 {
                     continue;
                 }
                 placements.Add(new Placement(center, shorter));
             }
             return placements;
+        }
+
+        private static bool UnderDeck(Vector2Int center, HashSet<Vector2Int> elevated)
+        {
+            if (elevated == null)
+            {
+                return false;
+            }
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    if (elevated.Contains(center + new Vector2Int(dx, dy)))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static bool IsTooClose(Vector2Int center, List<Placement> placed, int spacing)

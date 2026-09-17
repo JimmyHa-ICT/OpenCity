@@ -5,25 +5,28 @@ using UnityEngine;
 namespace OpenCity.EditorTools
 {
     /// <summary>
-    /// Plans the elevated highway network of a BSP city: groups the city into clusters by reading
-    /// the BSP tree back at a chosen depth (<see cref="CityBspLayout.Districts"/>), gives each
-    /// cluster one on/off ramp, picks which *far apart* clusters deserve a direct link, and routes
-    /// each link as an orthogonal run of deck cells. The result is a set of deck and ramp cells -
-    /// the builder paints those onto the highway's own Tilemap, this class never touches Unity
-    /// objects.
+    /// Plans the elevated expressway network of a BSP city by following the city's own road
+    /// hierarchy. Every BSP cut splits a region, so its depth in the tree ranks it: the depth-0 cut
+    /// crosses the whole city, the depth-1 cuts cross half of it, and so on. The expressways are
+    /// simply the top <see cref="Settings.Levels"/> tiers of those avenues, decked over from end to
+    /// end - like the elevated expressways built above the main avenues of Bangkok or Tokyo.
     ///
-    /// The ideas that make the result look like a real elevated expressway:
-    /// 1. **Right on top of a street, or well clear of one.** A deck cell is either over a street
-    ///    (following it, or flying straight across it) or has no street running alongside it. A
-    ///    viaduct one cell off a road, parallel to it, is the thing that never happens.
-    /// 2. **Turns happen over the road they follow, or far from any road.** Over a street the deck
-    ///    only turns onto, off or along it; off the street grid only where no street touches the cell.
-    /// 3. **Ramps stand clear of the street grid** except for the single cell where they touch
-    ///    down beside their hub, which becomes the interchange.
+    /// That one rule gives the network its shape for free:
+    /// 1. **Straight and readable.** A corridor is one cut, so it never turns, and it never leaves the
+    ///    street it follows - no block land is taken and there is nothing to route.
+    /// 2. **Connected like the city is.** A cut always ends on a road bounding its region, which is an
+    ///    ancestor's cut (or the ring). When that ancestor is an expressway too, the two decks meet in
+    ///    an elevated T or crossroad: the interchange.
+    /// 3. **Access where traffic is.** A corridor end that doesn't meet another expressway comes down
+    ///    onto its own avenue as a flyover ramp, and along the way the deck branches onto cross
+    ///    streets every <see cref="Settings.RampSpacing"/> cells, so every part of the city is served.
     ///
-    /// Fully deterministic: no randomness at all, and every loop runs over a sorted list, so the
-    /// same layout and settings always give the same highways. Coordinates are the city-local
-    /// cells of <see cref="CityBspLayout"/>. See Docs/CityHighwayGenerator.md.
+    /// Ramps are straight kit pieces lying over a street, so their cells get a cover tile on the
+    /// street layer (the street stays connected underneath). How well the blocks are served is
+    /// measured per block as the street distance to the nearest ramp.
+    ///
+    /// Fully deterministic, no randomness, city-local cells of <see cref="CityBspLayout"/>. See
+    /// Docs/CityHighwayGenerator.md.
     /// </summary>
     internal static class HighwayPlanner
     {
@@ -31,47 +34,51 @@ namespace OpenCity.EditorTools
         public const int MinRampLength = 1;
         public const int MaxRampLength = 2;
 
-        // North, East, South, West - the same clockwise order RoadGridPlacer rotates through.
+        /// <summary>Levels beyond this add nothing a city of at most 512 cells can use.</summary>
+        public const int MaxLevels = 6;
+
+        /// <summary>A corridor whose deck would be shorter than this once its end ramps are placed is dropped.</summary>
+        private const int MinDeckLength = 3;
+
+        /// <summary>Node index a corridor made from the perimeter ring gets, since the ring is not a BSP cut.</summary>
+        public const int RingNodeIndex = -1;
+
         private static readonly Vector2Int[] Steps =
         {
             new Vector2Int(0, 1), new Vector2Int(1, 0), new Vector2Int(0, -1), new Vector2Int(-1, 0),
         };
 
-        /// <summary>A step onto a fresh cell. Costs are doubled so a reused cell can be worth half a step without fractions.</summary>
-        private const int StepCost = 2;
-
-        /// <summary>A step onto a cell an earlier link already decked. Cheaper, so links merge into shared trunks instead of running side by side.</summary>
-        private const int ReuseStepCost = 1;
-
         public readonly struct Settings : IEquatable<Settings>
         {
-            /// <summary>Depth of the BSP tree the clusters are read off at: up to 2^depth of them.</summary>
-            public readonly int ClusterDepth;
-            /// <summary>Two clusters count as far apart, and so worth a highway, at this Manhattan cell distance between their hubs.</summary>
-            public readonly int MinSpanCells;
-            public readonly int MaxLinks;
-            /// <summary>Cells each ramp climbs over, 1 or 2.</summary>
+            /// <summary>How many top tiers of BSP cuts become expressways. 0 = none.</summary>
+            public readonly int Levels;
+            /// <summary>Cuts shorter than this many cells are left as streets.</summary>
+            public readonly int MinCorridorLength;
+            /// <summary>A corridor closer than this to a parallel, overlapping one is dropped (the earlier, higher-level one wins).</summary>
+            public readonly int MinCorridorSpacing;
+            /// <summary>Access ramps are placed at least this many cells apart along a corridor.</summary>
+            public readonly int RampSpacing;
+            /// <summary>Cells each ramp covers, 1 or 2.</summary>
             public readonly int RampLength;
-            /// <summary>What one change of direction costs the router, in cells. High = long straight runs.</summary>
-            public readonly int TurnCost;
-            /// <summary>A step over a street costs half a step, so routes ride on top of the street grid where they can.</summary>
-            public readonly bool FollowStreets;
+            /// <summary>Deck over the perimeter ring road too (only when the city has one).</summary>
+            public readonly bool RingExpressway;
 
-            public Settings(int clusterDepth, int minSpanCells, int maxLinks, int rampLength, int turnCost, bool followStreets)
+            public Settings(int levels, int minCorridorLength, int minCorridorSpacing, int rampSpacing, int rampLength,
+                bool ringExpressway)
             {
-                ClusterDepth = clusterDepth;
-                MinSpanCells = minSpanCells;
-                MaxLinks = maxLinks;
+                Levels = levels;
+                MinCorridorLength = minCorridorLength;
+                MinCorridorSpacing = minCorridorSpacing;
+                RampSpacing = rampSpacing;
                 RampLength = rampLength;
-                TurnCost = turnCost;
-                FollowStreets = followStreets;
+                RingExpressway = ringExpressway;
             }
 
             public bool Equals(Settings other)
             {
-                return ClusterDepth == other.ClusterDepth && MinSpanCells == other.MinSpanCells &&
-                       MaxLinks == other.MaxLinks && RampLength == other.RampLength && TurnCost == other.TurnCost &&
-                       FollowStreets == other.FollowStreets;
+                return Levels == other.Levels && MinCorridorLength == other.MinCorridorLength &&
+                       MinCorridorSpacing == other.MinCorridorSpacing && RampSpacing == other.RampSpacing &&
+                       RampLength == other.RampLength && RingExpressway == other.RingExpressway;
             }
 
             public override bool Equals(object obj)
@@ -81,55 +88,44 @@ namespace OpenCity.EditorTools
 
             public override int GetHashCode()
             {
-                return HashCode.Combine(ClusterDepth, MinSpanCells, MaxLinks, RampLength, TurnCost, FollowStreets);
+                return HashCode.Combine(Levels, MinCorridorLength, MinCorridorSpacing, RampSpacing, RampLength, RingExpressway);
             }
         }
 
-        /// <summary>
-        /// One cluster's connection to the highway: a street cell, and the direction in which a
-        /// ramp can climb away from it over free block cells.
-        /// </summary>
-        public readonly struct Hub
+        public enum RampKind
         {
-            /// <summary>The cluster this hub serves.</summary>
-            public readonly RectInt District;
-            /// <summary>The street cell the ramp touches down beside. Stays an ordinary road cell; it just gains an arm.</summary>
-            public readonly Vector2Int Cell;
-            /// <summary>Direction the ramp climbs in, away from <see cref="Cell"/>.</summary>
-            public readonly Vector2Int Direction;
-
-            public Hub(RectInt district, Vector2Int cell, Vector2Int direction)
-            {
-                District = district;
-                Cell = cell;
-                Direction = direction;
-            }
+            /// <summary>Where a corridor that meets no other expressway comes down onto its own avenue.</summary>
+            End,
+            /// <summary>A branch off the deck, coming down onto a cross street.</summary>
+            Access,
         }
 
-        /// <summary>One on/off ramp: <see cref="Length"/> cells climbing from ground beside a hub up to deck height.</summary>
+        /// <summary>One on/off ramp: <see cref="Length"/> cells over a street, climbing from ground to deck height.</summary>
         public readonly struct Ramp
         {
-            /// <summary>The lowest cell, orthogonally adjacent to the hub street cell.</summary>
+            /// <summary>The lowest cell. Traffic leaves it onto <see cref="Continuation"/>.</summary>
             public readonly Vector2Int Foot;
-            /// <summary>Direction the ramp climbs in. The piece therefore *descends* toward -Direction.</summary>
+            /// <summary>Direction the ramp climbs in, toward the deck. The piece therefore *descends* toward -Direction.</summary>
             public readonly Vector2Int Direction;
             public readonly int Length;
+            public readonly RampKind Kind;
 
-            public Ramp(Vector2Int foot, Vector2Int direction, int length)
+            public Ramp(Vector2Int foot, Vector2Int direction, int length, RampKind kind)
             {
                 Foot = foot;
                 Direction = direction;
                 Length = length;
+                Kind = kind;
             }
 
-            /// <summary>The highest cell - the one the deck continues from.</summary>
+            /// <summary>The highest cell - the one next to the deck.</summary>
             public Vector2Int Top => Foot + Direction * (Length - 1);
 
-            /// <summary>The first deck cell beyond the ramp.</summary>
-            public Vector2Int DeckStart => Foot + Direction * Length;
+            /// <summary>The deck cell the ramp joins.</summary>
+            public Vector2Int DeckJoin => Foot + Direction * Length;
 
-            /// <summary>The hub street cell this ramp lands beside.</summary>
-            public Vector2Int Hub => Foot - Direction;
+            /// <summary>The street cell traffic reaches the ground on.</summary>
+            public Vector2Int Continuation => Foot - Direction;
 
             public IEnumerable<Vector2Int> Cells
             {
@@ -143,75 +139,96 @@ namespace OpenCity.EditorTools
             }
         }
 
-        public sealed class Link
+        /// <summary>One expressway: a BSP cut (or the ring) and the part of it that is decked over.</summary>
+        public sealed class Corridor
         {
-            public readonly Ramp RampA;
-            public readonly Ramp RampB;
-            /// <summary>Deck cells in travel order, from RampA.DeckStart to RampB.DeckStart inclusive. Never empty.</summary>
-            public readonly List<Vector2Int> Deck;
-            /// <summary>Manhattan distance between the two hubs - what "far apart" was measured on.</summary>
-            public readonly int Span;
+            /// <summary>Index into <see cref="CityBspLayout.Layout.Nodes"/> of the region the cut splits; <see cref="RingNodeIndex"/> for the ring.</summary>
+            public readonly int NodeIndex;
+            /// <summary>BSP depth of the cut; -1 for the ring.</summary>
+            public readonly int Depth;
+            /// <summary>Every cell of the cut in order (west to east, south to north), or the ring in order.</summary>
+            public readonly List<Vector2Int> Cells;
+            /// <summary>The decked-over cells, in the same order. Empty until planned; a dropped corridor keeps it empty.</summary>
+            public readonly List<Vector2Int> Deck = new List<Vector2Int>();
+            public readonly bool IsRing;
 
-            public Link(Ramp rampA, Ramp rampB, List<Vector2Int> deck, int span)
+            public Corridor(int nodeIndex, int depth, List<Vector2Int> cells, bool isRing)
             {
-                RampA = rampA;
-                RampB = rampB;
-                Deck = deck;
-                Span = span;
+                NodeIndex = nodeIndex;
+                Depth = depth;
+                Cells = cells;
+                IsRing = isRing;
             }
+
+            public bool Vertical => !IsRing && Cells.Count > 1 && Cells[0].x == Cells[1].x;
         }
 
         public sealed class Plan
         {
-            /// <summary>The clusters the city was cut into, whether or not they ended up on the highway.</summary>
-            public readonly List<RectInt> Districts;
-            public readonly List<Hub> Hubs;
-            public readonly List<Link> Links;
+            /// <summary>The expressways that were built, parents before children.</summary>
+            public readonly List<Corridor> Corridors;
             public readonly List<Ramp> Ramps;
-            /// <summary>Every elevated cell, once, however many links run over it.</summary>
+            /// <summary>Every elevated cell.</summary>
             public readonly HashSet<Vector2Int> DeckCells;
             /// <summary>Deck cells in a stable (y, x) order - what the builder walks.</summary>
             public readonly List<Vector2Int> DeckCellsSorted;
+            /// <summary>Every ramp cell. They all lie over streets, which get a cover tile under them.</summary>
             public readonly HashSet<Vector2Int> RampCells;
-            /// <summary>Ramp cells in a stable order.</summary>
             public readonly List<Vector2Int> RampCellsSorted;
+            /// <summary>BSP node indices whose cut became an expressway.</summary>
+            public readonly HashSet<int> ExpresswayNodes;
+            /// <summary>Places where two expressways meet.</summary>
+            public readonly int Interchanges;
+            /// <summary>Cuts that qualified by level and length.</summary>
+            public readonly int CandidateCorridors;
+            /// <summary>Candidates dropped for being too close to a parallel expressway.</summary>
+            public readonly int TooCloseCorridors;
+            /// <summary>Candidates dropped because no end ramp fit (every spot was a junction, or the deck got too short).</summary>
+            public readonly int UnrampableCorridors;
             /// <summary>
-            /// The bottom cell of each ramp, in a stable order - the only highway cells that get a
-            /// cover tile. Painting the rest of a ramp too would hand a road arm to whatever street
-            /// happens to lie beyond its top, which the highway passes over rather than joins.
+            /// For each block of the layout, in <see cref="CityBspLayout.Layout.Blocks"/> order: the
+            /// street distance in cells from the block's edge to the nearest ramp. -1 when there are
+            /// no ramps (or the block is unreachable).
             /// </summary>
-            public readonly List<Vector2Int> FootCells;
-            /// <summary>Clusters with nowhere to put a ramp (no street with enough clear block cells beside it).</summary>
-            public readonly int DistrictsWithoutHub;
-            /// <summary>Links the router could not find a legal corridor for.</summary>
-            public readonly int UnroutableLinks;
-            /// <summary>Deck cells right on top of a street.</summary>
-            public readonly int BridgeCells;
+            public readonly List<int> BlockDistances;
+            public readonly int MaxBlockDistance;
+            public readonly float MeanBlockDistance;
 
-            public Plan(List<RectInt> districts, List<Hub> hubs, List<Link> links, List<Ramp> ramps,
-                HashSet<Vector2Int> deckCells, HashSet<Vector2Int> rampCells,
-                int districtsWithoutHub, int unroutableLinks, int bridgeCells)
+            public Plan(List<Corridor> corridors, List<Ramp> ramps, HashSet<Vector2Int> deckCells, HashSet<Vector2Int> rampCells,
+                HashSet<int> expresswayNodes, int interchanges, int candidates, int tooClose, int unrampable,
+                List<int> blockDistances)
             {
-                Districts = districts;
-                Hubs = hubs;
-                Links = links;
+                Corridors = corridors;
                 Ramps = ramps;
                 DeckCells = deckCells;
                 RampCells = rampCells;
-                DistrictsWithoutHub = districtsWithoutHub;
-                UnroutableLinks = unroutableLinks;
-                BridgeCells = bridgeCells;
+                ExpresswayNodes = expresswayNodes;
+                Interchanges = interchanges;
+                CandidateCorridors = candidates;
+                TooCloseCorridors = tooClose;
+                UnrampableCorridors = unrampable;
+                BlockDistances = blockDistances;
                 DeckCellsSorted = Sorted(deckCells);
                 RampCellsSorted = Sorted(rampCells);
-                var feet = new HashSet<Vector2Int>();
-                foreach (Ramp ramp in ramps)
+
+                int max = -1;
+                long sum = 0;
+                int count = 0;
+                foreach (int distance in blockDistances)
                 {
-                    feet.Add(ramp.Foot);
+                    if (distance < 0)
+                    {
+                        continue;
+                    }
+                    max = Mathf.Max(max, distance);
+                    sum += distance;
+                    count++;
                 }
-                FootCells = Sorted(feet);
+                MaxBlockDistance = max;
+                MeanBlockDistance = count > 0 ? (float)sum / count : -1f;
             }
 
-            public bool IsEmpty => Links.Count == 0;
+            public bool IsEmpty => Corridors.Count == 0;
 
             private static List<Vector2Int> Sorted(HashSet<Vector2Int> cells)
             {
@@ -221,179 +238,150 @@ namespace OpenCity.EditorTools
             }
         }
 
-        /// <summary>
-        /// Plans the whole network. <paramref name="reservedCells"/> are cells the highway must keep
-        /// off entirely - the caller passes the roundabout footprints. A street can carry the deck
-        /// because its supports land on the kerbs; a roundabout is three cells wide and a support
-        /// would come down inside it, so the deck goes round instead.
-        /// </summary>
-        public static Plan Build(CityBspLayout.Layout layout, HashSet<Vector2Int> reservedCells, Settings settings)
+        /// <summary>Plans the whole network. Levels 0 (or a city with no cuts) gives an empty plan.</summary>
+        public static Plan Build(CityBspLayout.Layout layout, Settings settings)
         {
-            var districts = CityBspLayout.Districts(layout, settings.ClusterDepth);
-            var hubs = new List<Hub>();
-            var links = new List<Link>();
+            var built = new List<Corridor>();
             var ramps = new List<Ramp>();
-            var deckCells = new HashSet<Vector2Int>();
+            var deck = new HashSet<Vector2Int>();
             var rampCells = new HashSet<Vector2Int>();
-            var rampFeet = new HashSet<Vector2Int>();
-
-            int rampLength = Mathf.Clamp(settings.RampLength, MinRampLength, MaxRampLength);
-            var blocked = reservedCells ?? new HashSet<Vector2Int>();
-            // The deck may run on top of streets or well clear of them; reserved cells are out of
-            // bounds altogether. Aliased, not copied - nothing below writes to it, and the layout it
-            // belongs to is cached and shared with the preview.
+            var expresswayNodes = new HashSet<int>();
             HashSet<Vector2Int> streets = layout.RoadCells;
+            int rampLength = Mathf.Clamp(settings.RampLength, MinRampLength, MaxRampLength);
 
-            // Preorder is already deterministic, but sorting by position makes the hub each cluster
-            // ends up with independent of how the tree happened to be walked.
-            districts.Sort((p, q) => p.y != q.y ? p.y.CompareTo(q.y) : p.x.CompareTo(q.x));
+            List<Corridor> candidates = Candidates(layout, settings);
+            int candidateCount = candidates.Count;
+            int tooClose = 0;
+            int unrampable = 0;
+            int interchanges = 0;
 
-            if (settings.MaxLinks <= 0)
+            // Parents before children: a cut can only end on an ancestor's cut (or the ring), and
+            // those come first in this order, so whether a corridor end meets another expressway is
+            // already settled when the corridor is planned.
+            foreach (Corridor corridor in candidates)
             {
-                // Nothing to build, and finding hubs is the expensive part - skip it entirely so
-                // turning highways off costs a big city nothing.
-                return new Plan(districts, hubs, links, ramps, deckCells, rampCells, 0, 0, 0);
-            }
-
-            // Two ramps must never touch: on the highway's own Tilemap a ramp foot is recognised by
-            // having exactly one highway neighbour, so a second ramp beside it would turn both into
-            // deck pieces. rampZone is every accepted ramp's cells and their neighbours (which
-            // includes its hub); a new ramp's hub, cells and deck start must all stay out of it.
-            var rampZone = new HashSet<Vector2Int>();
-            int withoutHub = 0;
-            foreach (RectInt district in districts)
-            {
-                if (TryFindHub(district, layout, blocked, rampZone, rampLength, out Hub hub))
+                if (!corridor.IsRing && IsTooClose(corridor, built, settings.MinCorridorSpacing))
                 {
-                    hubs.Add(hub);
-                    foreach (Vector2Int cell in new Ramp(hub.Cell + hub.Direction, hub.Direction, rampLength).Cells)
-                    {
-                        rampZone.Add(cell);
-                        for (int d = 0; d < Steps.Length; d++)
-                        {
-                            rampZone.Add(cell + Steps[d]);
-                        }
-                    }
-                }
-                else
-                {
-                    withoutHub++;
-                }
-            }
-
-            var router = new Router(layout.SideLength, streets, blocked, Mathf.Max(0, settings.TurnCost),
-                settings.FollowStreets);
-            // Every hub's ramp corridor is reserved before anything is routed, not as each link is
-            // committed. A ramp's cells were fixed when its hub was chosen, so a deck laid down
-            // first could otherwise sit exactly where a later link's ramp has to climb - with no
-            // way to reroute the ramp afterwards.
-            foreach (Hub hub in hubs)
-            {
-                router.Reserve(new Ramp(hub.Cell + hub.Direction, hub.Direction, rampLength));
-            }
-
-            int unroutable = 0;
-            foreach ((int a, int b, int span) in SelectLinks(hubs, settings))
-            {
-                Ramp rampA = new Ramp(hubs[a].Cell + hubs[a].Direction, hubs[a].Direction, rampLength);
-                Ramp rampB = new Ramp(hubs[b].Cell + hubs[b].Direction, hubs[b].Direction, rampLength);
-                List<Vector2Int> deck = router.Route(rampA, rampB);
-                if (deck == null)
-                {
-                    unroutable++;
+                    tooClose++;
                     continue;
                 }
-                links.Add(new Link(rampA, rampB, deck, span));
-                // The links form a spanning tree, so a cluster served by more than one of them
-                // shares the one ramp: its foot identifies it, since a hub has a single direction.
-                if (rampFeet.Add(rampA.Foot))
+                if (corridor.IsRing)
                 {
-                    ramps.Add(rampA);
+                    corridor.Deck.AddRange(corridor.Cells);
                 }
-                if (rampFeet.Add(rampB.Foot))
+                else if (!PlanStraightCorridor(corridor, streets, deck, rampCells, rampLength, ramps, ref interchanges))
                 {
-                    ramps.Add(rampB);
+                    unrampable++;
+                    continue;
                 }
-                rampCells.UnionWith(rampA.Cells);
-                rampCells.UnionWith(rampB.Cells);
-                deckCells.UnionWith(deck);
-                router.Commit(rampA, rampB, deck);
+                built.Add(corridor);
+                deck.UnionWith(corridor.Deck);
+                expresswayNodes.Add(corridor.NodeIndex);
             }
 
-            int bridgeCells = 0;
-            foreach (Vector2Int cell in deckCells)
+            foreach (Corridor corridor in built)
             {
-                if (streets.Contains(cell))
-                {
-                    bridgeCells++;
-                }
+                PlaceAccessRamps(corridor, streets, deck, rampCells, rampLength, Mathf.Max(1, settings.RampSpacing), ramps);
             }
 
-            return new Plan(districts, hubs, links, ramps, deckCells, rampCells,
-                withoutHub, unroutable, bridgeCells);
+            List<int> distances = BlockDistances(layout, ramps);
+            return new Plan(built, ramps, deck, rampCells, expresswayNodes, interchanges, candidateCount, tooClose, unrampable,
+                distances);
         }
 
         // ---------------------------------------------------------------
-        // Hubs
+        // Corridors
         // ---------------------------------------------------------------
+
+        /// <summary>The ring (if asked for), then every cut of the top levels long enough, by depth, longest first, then position.</summary>
+        private static List<Corridor> Candidates(CityBspLayout.Layout layout, Settings settings)
+        {
+            var result = new List<Corridor>();
+            int levels = Mathf.Clamp(settings.Levels, 0, MaxLevels);
+            if (levels == 0 || layout.SideLength < 3)
+            {
+                return result;
+            }
+            if (settings.RingExpressway && layout.PerimeterCellCount > 0)
+            {
+                result.Add(new Corridor(RingNodeIndex, -1, RingCells(layout.SideLength), true));
+            }
+
+            var cuts = new List<Corridor>();
+            for (int i = 0; i < layout.Nodes.Count; i++)
+            {
+                CityBspLayout.Node node = layout.Nodes[i];
+                if (node.IsLeaf || node.Depth >= levels)
+                {
+                    continue;
+                }
+                RectInt cut = node.Cut;
+                int length = Mathf.Max(cut.width, cut.height);
+                if (length < Mathf.Max(1, settings.MinCorridorLength))
+                {
+                    continue;
+                }
+                var cells = new List<Vector2Int>(length);
+                for (int k = 0; k < length; k++)
+                {
+                    cells.Add(node.CutVertical ? new Vector2Int(cut.x, cut.y + k) : new Vector2Int(cut.x + k, cut.y));
+                }
+                cuts.Add(new Corridor(i, node.Depth, cells, false));
+            }
+            cuts.Sort((p, q) =>
+            {
+                if (p.Depth != q.Depth) return p.Depth.CompareTo(q.Depth);
+                if (p.Cells.Count != q.Cells.Count) return q.Cells.Count.CompareTo(p.Cells.Count);
+                return p.NodeIndex.CompareTo(q.NodeIndex);
+            });
+            result.AddRange(cuts);
+            return result;
+        }
+
+        private static List<Vector2Int> RingCells(int side)
+        {
+            var cells = new List<Vector2Int>();
+            int last = side - 1;
+            for (int x = 0; x < last; x++) cells.Add(new Vector2Int(x, 0));
+            for (int y = 0; y < last; y++) cells.Add(new Vector2Int(last, y));
+            for (int x = last; x > 0; x--) cells.Add(new Vector2Int(x, last));
+            for (int y = last; y > 0; y--) cells.Add(new Vector2Int(0, y));
+            return cells;
+        }
 
         /// <summary>
-        /// The street cell of <paramref name="district"/> nearest its center that a ramp can climb
-        /// away from. A candidate needs, in the direction the ramp would climb,
-        /// <paramref name="rampLength"/> free block cells in a row plus one more cell inside the
-        /// city for the deck to start on. The ramp's cells must have no road neighbour of their own
-        /// (other than the hub itself) so the cover tile under the ramp can only ever create the
-        /// one intended junction, and the hub must not already sit beside a junction, so painting
-        /// that junction can't break the city's "no two intersections side by side" guarantee.
-        /// Neither the hub, the ramp nor the deck start may touch a ramp another cluster already has.
-        ///
-        /// The district rect covers the ground *between* the roads bounding it, so it is grown by
-        /// one cell here: that brings in those bounding roads, and it is the only thing that gives
-        /// a cluster which is a single uncut block any street to start from at all.
+        /// True if <paramref name="corridor"/> runs parallel to an expressway already built, closer than
+        /// <paramref name="spacing"/>, over a stretch where the two overlap. The ring counts as its four sides.
         /// </summary>
-        private static bool TryFindHub(RectInt district, CityBspLayout.Layout layout, HashSet<Vector2Int> reserved,
-            HashSet<Vector2Int> rampZone, int rampLength, out Hub hub)
+        private static bool IsTooClose(Corridor corridor, List<Corridor> built, int spacing)
         {
-            hub = default;
-            int side = layout.SideLength;
-            var area = new RectInt(district.x - 1, district.y - 1, district.width + 2, district.height + 2);
-            var center = new Vector2(district.x + district.width * 0.5f, district.y + district.height * 0.5f);
-
-            float bestScore = float.MaxValue;
-            bool found = false;
-            foreach (Vector2Int cell in layout.RoadCellsSorted)
+            if (spacing <= 0)
             {
-                if (!area.Contains(cell) || rampZone.Contains(cell) || reserved.Contains(cell) ||
-                    IsBesideJunction(cell, layout.RoadCells))
+                return false;
+            }
+            bool vertical = corridor.Vertical;
+            int position = vertical ? corridor.Cells[0].x : corridor.Cells[0].y;
+            int from = vertical ? corridor.Cells[0].y : corridor.Cells[0].x;
+            int to = from + corridor.Cells.Count - 1;
+            foreach (Corridor other in built)
+            {
+                if (other.IsRing)
+                {
+                    int last = other.Cells.Count / 4; // side - 1
+                    if (Mathf.Abs(position - 0) < spacing || Mathf.Abs(position - last) < spacing)
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+                if (other.Vertical != vertical || other.Deck.Count == 0)
                 {
                     continue;
                 }
-                float score = (new Vector2(cell.x + 0.5f, cell.y + 0.5f) - center).sqrMagnitude;
-                if (score >= bestScore)
-                {
-                    continue; // strict, so the first cell of the sorted list wins a tie
-                }
-                for (int d = 0; d < Steps.Length; d++)
-                {
-                    if (!RampFits(cell, Steps[d], side, reserved, layout.RoadCells, rampLength) ||
-                        TouchesRampZone(cell, Steps[d], rampLength, rampZone))
-                    {
-                        continue;
-                    }
-                    hub = new Hub(district, cell, Steps[d]);
-                    bestScore = score;
-                    found = true;
-                    break; // Steps is in a fixed order, so the tie between two directions is too
-                }
-            }
-            return found;
-        }
-
-        private static bool TouchesRampZone(Vector2Int street, Vector2Int step, int rampLength, HashSet<Vector2Int> rampZone)
-        {
-            for (int i = 1; i <= rampLength + 1; i++)
-            {
-                if (rampZone.Contains(street + step * i))
+                int otherPosition = vertical ? other.Deck[0].x : other.Deck[0].y;
+                int otherFrom = vertical ? other.Deck[0].y : other.Deck[0].x;
+                int otherTo = otherFrom + other.Deck.Count - 1;
+                if (Mathf.Abs(position - otherPosition) < spacing && from <= otherTo && otherFrom <= to)
                 {
                     return true;
                 }
@@ -401,516 +389,360 @@ namespace OpenCity.EditorTools
             return false;
         }
 
-        /// <summary>Whether a ramp climbing from <paramref name="street"/> in <paramref name="step"/> has the clear run it needs.</summary>
-        private static bool RampFits(Vector2Int street, Vector2Int step, int side,
-            HashSet<Vector2Int> reserved, HashSet<Vector2Int> roads, int rampLength)
+        /// <summary>
+        /// Settles a straight corridor's two ends. An end whose next cell out is already deck is an
+        /// interchange: the deck runs right to it. Any other end gets a flyover ramp coming down onto
+        /// the avenue, as close to the end as it fits. Returns false if an end has nowhere for a ramp.
+        /// </summary>
+        private static bool PlanStraightCorridor(Corridor corridor, HashSet<Vector2Int> streets, HashSet<Vector2Int> deck,
+            HashSet<Vector2Int> rampCells, int rampLength, List<Ramp> ramps, ref int interchanges)
         {
-            for (int i = 1; i <= rampLength; i++)
+            List<Vector2Int> cells = corridor.Cells;
+            int count = cells.Count;
+            Vector2Int axis = count > 1 ? cells[1] - cells[0] : Vector2Int.right;
+
+            bool startMeets = deck.Contains(cells[0] - axis);
+            bool endMeets = deck.Contains(cells[count - 1] + axis);
+
+            int first = 0;
+            int last = count - 1;
+            Ramp? startRamp = null;
+            Ramp? endRamp = null;
+            // Each end may search at most half the corridor, so the two ramps can never overlap.
+            int searchLimit = Mathf.Max(0, (count - MinDeckLength) / 2 - rampLength);
+            if (!startMeets)
             {
-                Vector2Int cell = street + step * i;
-                if (!InCity(cell, side) || roads.Contains(cell) || reserved.Contains(cell))
+                if (!TryFindEndRamp(cells, 0, 1, axis, rampLength, searchLimit, streets, deck, rampCells, out Ramp ramp))
                 {
                     return false;
                 }
-                // Every road neighbour of a ramp cell would gain an arm once the cover tile goes
-                // down. Only the hub may do that, and only from the first cell.
-                for (int d = 0; d < Steps.Length; d++)
+                startRamp = ramp;
+                first = IndexOf(cells, ramp.DeckJoin);
+            }
+            if (!endMeets)
+            {
+                if (!TryFindEndRamp(cells, count - 1, -1, -axis, rampLength, searchLimit, streets, deck, rampCells, out Ramp ramp))
                 {
-                    Vector2Int neighbor = cell + Steps[d];
-                    if (neighbor != street + step * (i - 1) && neighbor != street + step * (i + 1) &&
-                        roads.Contains(neighbor))
+                    return false;
+                }
+                endRamp = ramp;
+                last = IndexOf(cells, ramp.DeckJoin);
+            }
+            if (last - first + 1 < MinDeckLength)
+            {
+                return false;
+            }
+
+            for (int i = first; i <= last; i++)
+            {
+                corridor.Deck.Add(cells[i]);
+            }
+            foreach (Ramp? ramp in new[] { startRamp, endRamp })
+            {
+                if (ramp.HasValue)
+                {
+                    ramps.Add(ramp.Value);
+                    rampCells.UnionWith(ramp.Value.Cells);
+                }
+            }
+            if (startMeets) interchanges++;
+            if (endMeets) interchanges++;
+            return true;
+        }
+
+        /// <summary>
+        /// Walks inward from the end at <paramref name="endIndex"/> for the first spot a ramp fits:
+        /// <paramref name="rampLength"/> plain street cells (no cross street) with a street beyond the
+        /// foot for traffic to reach the ground on, and a deck cell above the top.
+        /// </summary>
+        private static bool TryFindEndRamp(List<Vector2Int> cells, int endIndex, int inward, Vector2Int climb, int rampLength,
+            int searchLimit, HashSet<Vector2Int> streets, HashSet<Vector2Int> deck, HashSet<Vector2Int> rampCells, out Ramp ramp)
+        {
+            for (int offset = 0; offset <= searchLimit; offset++)
+            {
+                int footIndex = endIndex + inward * offset;
+                int joinIndex = footIndex + inward * rampLength;
+                if (joinIndex < 0 || joinIndex >= cells.Count)
+                {
+                    break;
+                }
+                var candidate = new Ramp(cells[footIndex], climb, rampLength, RampKind.End);
+                if (RampFits(candidate, streets, deck, rampCells))
+                {
+                    ramp = candidate;
+                    return true;
+                }
+            }
+            ramp = default;
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Access ramps
+        // ---------------------------------------------------------------
+
+        /// <summary>
+        /// Walks the corridor's deck and branches a ramp onto a cross street wherever one fits at least
+        /// <paramref name="spacing"/> cells from the previous ramp. End ramps count as the first and last
+        /// ramps, so a short corridor that already has both may need no access ramp at all. A junction
+        /// right beside an interchange or another branch is skipped, so no two elevated junctions touch.
+        /// </summary>
+        private static void PlaceAccessRamps(Corridor corridor, HashSet<Vector2Int> streets, HashSet<Vector2Int> deck,
+            HashSet<Vector2Int> rampCells, int rampLength, int spacing, List<Ramp> ramps)
+        {
+            List<Vector2Int> cells = corridor.Deck;
+            int count = cells.Count;
+            if (count == 0)
+            {
+                return;
+            }
+
+            // An end ramp joins the deck at its first or last cell.
+            int lastRamp = HasRampJoining(cells[0], ramps) ? 0 : int.MinValue / 2;
+            bool endHasRamp = HasRampJoining(cells[count - 1], ramps);
+            int firstChosen = -1;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (i - lastRamp < spacing)
+                {
+                    continue;
+                }
+                if (!corridor.IsRing && endHasRamp && (count - 1) - i < spacing)
+                {
+                    break;
+                }
+                // Around the ring the gap back to the first ramp counts too.
+                if (corridor.IsRing && firstChosen >= 0 && firstChosen + count - i < spacing)
+                {
+                    break;
+                }
+                Vector2Int cell = cells[i];
+                if (!corridor.IsRing && (i == 0 || i == count - 1))
+                {
+                    continue; // corridor ends are where interchanges and end ramps join
+                }
+                Vector2Int along = corridor.IsRing ? cells[(i + 1) % count] - cell : cells[Mathf.Min(i + 1, count - 1)] - cells[Mathf.Max(i - 1, 0)];
+                if (corridor.IsRing && cells[(i + count - 1) % count] - cell != -along)
+                {
+                    continue; // a ring corner
+                }
+                along = new Vector2Int(Math.Sign(along.x), Math.Sign(along.y));
+                if (BranchesNearby(cell, along, deck, rampCells))
+                {
+                    continue;
+                }
+                var lateral = new Vector2Int(along.y, along.x);
+                foreach (Vector2Int side in new[] { lateral, -lateral })
+                {
+                    Vector2Int down = cell + side;
+                    if (!streets.Contains(down))
+                    {
+                        continue;
+                    }
+                    var candidate = new Ramp(cell + side * rampLength, -side, rampLength, RampKind.Access);
+                    if (!RampFits(candidate, streets, deck, rampCells))
+                    {
+                        continue;
+                    }
+                    ramps.Add(candidate);
+                    rampCells.UnionWith(candidate.Cells);
+                    lastRamp = i;
+                    if (firstChosen < 0)
+                    {
+                        firstChosen = i;
+                    }
+                    break;
+                }
+            }
+        }
+
+        private static bool HasRampJoining(Vector2Int cell, List<Ramp> ramps)
+        {
+            foreach (Ramp ramp in ramps)
+            {
+                if (ramp.DeckJoin == cell)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// True if this deck cell, or the deck cell either side of it along the corridor, already has an
+        /// elevated neighbour off the corridor (another expressway or a ramp), so a branch here would
+        /// touch or double up on that junction.
+        /// </summary>
+        private static bool BranchesNearby(Vector2Int cell, Vector2Int along, HashSet<Vector2Int> deck, HashSet<Vector2Int> rampCells)
+        {
+            var lateral = new Vector2Int(along.y, along.x);
+            for (int k = -1; k <= 1; k++)
+            {
+                Vector2Int c = cell + along * k;
+                foreach (Vector2Int n in new[] { c + lateral, c - lateral })
+                {
+                    if (deck.Contains(n) || rampCells.Contains(n))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Ramp rules
+        // ---------------------------------------------------------------
+
+        /// <summary>
+        /// Whether a ramp can stand here. Every ramp cell must be a plain street cell running the
+        /// ramp's way - no cross street, since the ramp would drop onto it - and not already elevated,
+        /// with nothing elevated beside it (on the highway's own Tilemap a ramp foot is recognised by
+        /// having exactly one highway neighbour). The cell the foot lands on must be a street that isn't
+        /// elevated either, and the cell above the top must be deck or about to be.
+        /// </summary>
+        private static bool RampFits(Ramp ramp, HashSet<Vector2Int> streets, HashSet<Vector2Int> deck, HashSet<Vector2Int> rampCells)
+        {
+            Vector2Int lateral = new Vector2Int(ramp.Direction.y, ramp.Direction.x);
+            foreach (Vector2Int cell in ramp.Cells)
+            {
+                if (!streets.Contains(cell) || deck.Contains(cell) || rampCells.Contains(cell) ||
+                    streets.Contains(cell + lateral) || streets.Contains(cell - lateral) ||
+                    !streets.Contains(cell + ramp.Direction) || !streets.Contains(cell - ramp.Direction))
+                {
+                    return false;
+                }
+                foreach (Vector2Int n in new[] { cell + lateral, cell - lateral })
+                {
+                    if (deck.Contains(n) || rampCells.Contains(n))
                     {
                         return false;
                     }
                 }
             }
-            // The deck leaves the ramp dead straight, so its first cell is either a street it rides
-            // straight onto or a cell with no street running alongside it.
-            Vector2Int deckStart = street + step * (rampLength + 1);
-            return InCity(deckStart, side) && !reserved.Contains(deckStart) &&
-                   (roads.Contains(deckStart) || !HasLateralStreet(deckStart, DirectionIndexOf(step), roads));
+            Vector2Int landing = ramp.Continuation;
+            if (!streets.Contains(landing) || deck.Contains(landing) || rampCells.Contains(landing))
+            {
+                return false;
+            }
+            // Nothing elevated may touch the landing from the sides either, or the foot would read as deck.
+            foreach (Vector2Int step in Steps)
+            {
+                Vector2Int n = landing + step;
+                if (n != ramp.Foot && rampCells.Contains(n))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
-        private static int DirectionIndexOf(Vector2Int step)
+        private static int IndexOf(List<Vector2Int> cells, Vector2Int cell)
         {
-            for (int i = 0; i < Steps.Length; i++)
+            for (int i = 0; i < cells.Count; i++)
             {
-                if (Steps[i] == step)
+                if (cells[i] == cell)
                 {
                     return i;
                 }
             }
-            return 0;
-        }
-
-        /// <summary>True if any orthogonal neighbour of <paramref name="cell"/> is already a T-junction or crossroad.</summary>
-        private static bool IsBesideJunction(Vector2Int cell, HashSet<Vector2Int> roads)
-        {
-            for (int d = 0; d < Steps.Length; d++)
-            {
-                Vector2Int neighbor = cell + Steps[d];
-                if (!roads.Contains(neighbor))
-                {
-                    continue;
-                }
-                int degree = 0;
-                for (int e = 0; e < Steps.Length; e++)
-                {
-                    if (roads.Contains(neighbor + Steps[e]))
-                    {
-                        degree++;
-                    }
-                }
-                if (degree >= 3)
-                {
-                    return true;
-                }
-            }
-            return false;
+            return -1;
         }
 
         // ---------------------------------------------------------------
-        // Which clusters get linked
+        // Coverage
         // ---------------------------------------------------------------
 
         /// <summary>
-        /// The links worth building, shortest first. Only pairs at least
-        /// <see cref="Settings.MinSpanCells"/> apart are candidates - that is the whole point of a
-        /// highway, and it is what keeps neighbouring clusters off it, since they already have
-        /// streets. Kruskal over those candidates then keeps a link only when it joins two parts of
-        /// the network that were not connected yet, so the result is a minimum spanning forest: no
-        /// redundant parallel routes, and a cluster with no far partner simply stays off the
-        /// highway and is reached through its neighbour's hub.
+        /// Street distance from each block to the nearest ramp: a breadth-first search over the street
+        /// grid from every ramp's landing cell, read at the streets bordering each block.
         /// </summary>
-        private static List<(int a, int b, int span)> SelectLinks(List<Hub> hubs, Settings settings)
+        private static List<int> BlockDistances(CityBspLayout.Layout layout, List<Ramp> ramps)
         {
-            var candidates = new List<(int a, int b, int span)>();
-            for (int i = 0; i < hubs.Count; i++)
+            var result = new List<int>(layout.Blocks.Count);
+            if (ramps.Count == 0)
             {
-                for (int j = i + 1; j < hubs.Count; j++)
+                foreach (RectInt _ in layout.Blocks)
                 {
-                    int span = Mathf.Abs(hubs[i].Cell.x - hubs[j].Cell.x) + Mathf.Abs(hubs[i].Cell.y - hubs[j].Cell.y);
-                    if (span >= Mathf.Max(1, settings.MinSpanCells))
+                    result.Add(-1);
+                }
+                return result;
+            }
+
+            int side = layout.SideLength;
+            var distance = new int[side * side];
+            for (int i = 0; i < distance.Length; i++)
+            {
+                distance[i] = -1;
+            }
+            var queue = new Queue<Vector2Int>();
+            foreach (Ramp ramp in ramps)
+            {
+                foreach (Vector2Int source in new[] { ramp.Continuation, ramp.Foot })
+                {
+                    int index = source.y * side + source.x;
+                    if (InCity(source, side) && distance[index] < 0)
                     {
-                        candidates.Add((i, j, span));
+                        distance[index] = 0;
+                        queue.Enqueue(source);
                     }
                 }
             }
-            candidates.Sort((p, q) =>
+            while (queue.Count > 0)
             {
-                if (p.span != q.span) return p.span.CompareTo(q.span);
-                if (p.a != q.a) return p.a.CompareTo(q.a);
-                return p.b.CompareTo(q.b);
-            });
-
-            var parent = new int[hubs.Count];
-            for (int i = 0; i < parent.Length; i++)
-            {
-                parent[i] = i;
-            }
-
-            var chosen = new List<(int a, int b, int span)>();
-            int limit = Mathf.Max(0, settings.MaxLinks);
-            foreach ((int a, int b, int span) in candidates)
-            {
-                if (chosen.Count >= limit)
+                Vector2Int cell = queue.Dequeue();
+                int d = distance[cell.y * side + cell.x];
+                foreach (Vector2Int step in Steps)
                 {
-                    break;
+                    Vector2Int next = cell + step;
+                    if (!InCity(next, side) || !layout.RoadCells.Contains(next))
+                    {
+                        continue;
+                    }
+                    int index = next.y * side + next.x;
+                    if (distance[index] < 0)
+                    {
+                        distance[index] = d + 1;
+                        queue.Enqueue(next);
+                    }
                 }
-                int rootA = Find(parent, a);
-                int rootB = Find(parent, b);
-                if (rootA == rootB)
-                {
-                    continue;
-                }
-                parent[rootA] = rootB;
-                chosen.Add((a, b, span));
             }
-            return chosen;
-        }
 
-        private static int Find(int[] parent, int i)
-        {
-            while (parent[i] != i)
+            foreach (RectInt block in layout.Blocks)
             {
-                parent[i] = parent[parent[i]];
-                i = parent[i];
+                int best = -1;
+                void Consider(int x, int y)
+                {
+                    var cell = new Vector2Int(x, y);
+                    if (!InCity(cell, side))
+                    {
+                        return;
+                    }
+                    int d = distance[y * side + x];
+                    if (d >= 0 && (best < 0 || d < best))
+                    {
+                        best = d;
+                    }
+                }
+                for (int x = block.xMin; x < block.xMax; x++)
+                {
+                    Consider(x, block.yMin - 1);
+                    Consider(x, block.yMax);
+                }
+                for (int y = block.yMin; y < block.yMax; y++)
+                {
+                    Consider(block.xMin - 1, y);
+                    Consider(block.xMax, y);
+                }
+                result.Add(best);
             }
-            return i;
+            return result;
         }
 
         private static bool InCity(Vector2Int cell, int side)
         {
             return cell.x >= 0 && cell.y >= 0 && cell.x < side && cell.y < side;
-        }
-
-        // ---------------------------------------------------------------
-        // Routing
-        // ---------------------------------------------------------------
-
-        /// <summary>
-        /// A* over (cell, direction we entered it by) states, which is what lets a turn be priced
-        /// and lets a cell be legal to pass through but illegal to turn on. Kept alive across all
-        /// the links of one plan so each route can see - and share - the ones already committed.
-        /// </summary>
-        private sealed class Router
-        {
-            private readonly int side;
-            private readonly HashSet<Vector2Int> streets;
-            /// <summary>Cells the highway may not occupy at all - the roundabout footprints.</summary>
-            private readonly HashSet<Vector2Int> reserved;
-            private readonly HashSet<Vector2Int> deck = new HashSet<Vector2Int>();
-            /// <summary>Committed ramp cells and every cell touching one, minus the cells the deck legitimately uses.</summary>
-            private readonly HashSet<Vector2Int> rampKeepOut = new HashSet<Vector2Int>();
-
-            private readonly int turnPenalty;
-            private readonly bool followStreets;
-            private readonly int[] gScore;
-            private readonly int[] cameFrom;
-            private readonly int[] stamp;
-            private readonly Heap open = new Heap();
-            private int generation;
-
-            public Router(int sideLength, HashSet<Vector2Int> streetCells, HashSet<Vector2Int> reservedCells,
-                int turnCost, bool preferStreets)
-            {
-                side = Mathf.Max(1, sideLength);
-                streets = streetCells;
-                reserved = reservedCells;
-                turnPenalty = turnCost;
-                followStreets = preferStreets;
-                int states = side * side * 4;
-                gScore = new int[states];
-                cameFrom = new int[states];
-                stamp = new int[states];
-            }
-
-            /// <summary>
-            /// The deck cells from <paramref name="rampA"/> to <paramref name="rampB"/>, or null if
-            /// no legal corridor exists. The ramps themselves are not part of the result: the route
-            /// starts on the first cell past A's ramp and ends on the first cell before B's, which
-            /// is exactly the run that has to be held at deck height.
-            /// </summary>
-            public List<Vector2Int> Route(Ramp rampA, Ramp rampB)
-            {
-                Vector2Int start = rampA.DeckStart;
-                Vector2Int goal = rampB.DeckStart;
-                if (!InCity(start, side) || !InCity(goal, side))
-                {
-                    return null;
-                }
-
-                // The two ramps of *this* link get the same clearance as the committed ones, so the
-                // deck can't run up alongside its own ramp and pick up a phantom junction there.
-                var keepOut = new HashSet<Vector2Int>(rampKeepOut);
-                AddRampKeepOut(keepOut, rampA);
-                AddRampKeepOut(keepOut, rampB);
-                keepOut.Remove(start);
-                keepOut.Remove(goal);
-
-                // The route has to leave the goal straight down B's ramp, so arriving any other way
-                // means turning on the goal cell.
-                int goalHeading = DirectionIndexOf(-rampB.Direction);
-                if (!IsPassable(start, keepOut) || !IsPassable(goal, keepOut))
-                {
-                    return null;
-                }
-                // A ramp is the one part of a link with nothing to reroute, so if its cells have
-                // been decked over by an earlier link, this one simply isn't buildable.
-                if (!RampCellsAreFree(rampA) || !RampCellsAreFree(rampB))
-                {
-                    return null;
-                }
-
-                generation++;
-                open.Clear();
-
-                // The ramp's top cell is a ramp piece, so the deck leaves it dead straight: the
-                // search can only enter `start` along the ramp's own direction.
-                int startHeading = DirectionIndexOf(rampA.Direction);
-                if (!CanEnter(start, startHeading))
-                {
-                    return null;
-                }
-                int startState = StateOf(start, startHeading);
-                stamp[startState] = generation;
-                gScore[startState] = 0;
-                cameFrom[startState] = -1;
-                open.Push(new HeapItem { F = Heuristic(start, goal), G = 0, Key = startState });
-
-                while (open.Count > 0)
-                {
-                    HeapItem item = open.Pop();
-                    int state = item.Key;
-                    if (stamp[state] != generation || gScore[state] != item.G)
-                    {
-                        continue; // stale entry, already expanded with a better score
-                    }
-                    Vector2Int cell = CellOf(state);
-                    int heading = state & 3;
-                    if (cell == goal && (heading == goalHeading || CanTurn(goal, heading, goalHeading)))
-                    {
-                        List<Vector2Int> route = Rebuild(state);
-                        // A route can still double back through a cell it had already decked, which a
-                        // per-step rule can't see since the state only knows where it came from. Rare
-                        // enough to drop the link over rather than complicate the search.
-                        return VisitsEachCellOnce(route) ? route : null;
-                    }
-
-                    for (int next = 0; next < Steps.Length; next++)
-                    {
-                        if (next == ((heading + 2) & 3))
-                        {
-                            continue; // no U-turn
-                        }
-                        bool turning = next != heading;
-                        if (turning && !CanTurn(cell, heading, next))
-                        {
-                            continue;
-                        }
-                        Vector2Int neighbor = cell + Steps[next];
-                        if (!IsPassable(neighbor, keepOut) || !CanEnter(neighbor, next))
-                        {
-                            continue;
-                        }
-                        int cost = deck.Contains(neighbor) || (followStreets && streets.Contains(neighbor))
-                            ? ReuseStepCost
-                            : StepCost;
-                        if (turning)
-                        {
-                            cost += StepCost * turnPenalty;
-                        }
-                        int tentative = item.G + cost;
-                        int neighborState = StateOf(neighbor, next);
-                        if (stamp[neighborState] == generation && gScore[neighborState] <= tentative)
-                        {
-                            continue;
-                        }
-                        stamp[neighborState] = generation;
-                        gScore[neighborState] = tentative;
-                        cameFrom[neighborState] = state;
-                        open.Push(new HeapItem
-                        {
-                            F = tentative + Heuristic(neighbor, goal),
-                            G = tentative,
-                            Key = neighborState,
-                        });
-                    }
-                }
-                return null;
-            }
-
-            /// <summary>Puts a hub's ramp, and the cells flanking it, permanently out of the deck's reach.</summary>
-            public void Reserve(Ramp ramp)
-            {
-                AddRampKeepOut(rampKeepOut, ramp);
-            }
-
-            private bool RampCellsAreFree(Ramp ramp)
-            {
-                foreach (Vector2Int cell in ramp.Cells)
-                {
-                    if (deck.Contains(cell))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            public void Commit(Ramp rampA, Ramp rampB, List<Vector2Int> route)
-            {
-                deck.UnionWith(route);
-                AddRampKeepOut(rampKeepOut, rampA);
-                AddRampKeepOut(rampKeepOut, rampB);
-                foreach (Vector2Int cell in route)
-                {
-                    rampKeepOut.Remove(cell);
-                }
-            }
-
-            /// <summary>
-            /// A ramp's cells and everything touching them, except the one cell the deck continues
-            /// from. The hub street stays out too: on the highway's own Tilemap a deck cell there
-            /// would be a second neighbour of the ramp's foot, and the foot would stop reading as a
-            /// ramp.
-            /// </summary>
-            private static void AddRampKeepOut(HashSet<Vector2Int> set, Ramp ramp)
-            {
-                foreach (Vector2Int cell in ramp.Cells)
-                {
-                    set.Add(cell);
-                    for (int d = 0; d < Steps.Length; d++)
-                    {
-                        set.Add(cell + Steps[d]);
-                    }
-                }
-                set.Remove(ramp.DeckStart);
-            }
-
-            private bool IsPassable(Vector2Int cell, HashSet<Vector2Int> keepOut)
-            {
-                return InCity(cell, side) && !keepOut.Contains(cell) && !reserved.Contains(cell);
-            }
-
-            /// <summary>
-            /// Whether the deck may enter <paramref name="cell"/> travelling in
-            /// <paramref name="heading"/>. Over a street, always - the highway is right on top of
-            /// it, whether following it or flying across. Off the street grid, only if no street
-            /// runs alongside: a street beside the cell is fine straight ahead or behind (the deck is
-            /// approaching or leaving a crossing), but one to either side would mean a viaduct
-            /// running parallel one cell off the road, which is what looks wrong.
-            /// </summary>
-            private bool CanEnter(Vector2Int cell, int heading)
-            {
-                return streets.Contains(cell) || !HasLateralStreet(cell, heading, streets);
-            }
-
-            /// <summary>
-            /// Whether the deck may turn from <paramref name="from"/> to <paramref name="to"/> on
-            /// <paramref name="cell"/>. Over a street it may only turn onto, off or along the street -
-            /// at least one of the two arms runs along the road below - so it never kinks across the
-            /// middle of a street. Off the street grid it may turn only where no street touches the
-            /// cell at all, i.e. well clear of the roads.
-            /// </summary>
-            private bool CanTurn(Vector2Int cell, int from, int to)
-            {
-                if (streets.Contains(cell))
-                {
-                    return streets.Contains(cell - Steps[from]) || streets.Contains(cell + Steps[to]);
-                }
-                for (int d = 0; d < Steps.Length; d++)
-                {
-                    if (streets.Contains(cell + Steps[d]))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            private static bool VisitsEachCellOnce(List<Vector2Int> route)
-            {
-                var visited = new HashSet<Vector2Int>();
-                foreach (Vector2Int cell in route)
-                {
-                    if (!visited.Add(cell))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            private static int Heuristic(Vector2Int from, Vector2Int to)
-            {
-                // Every step costs at least ReuseStepCost, so this never overestimates.
-                return (Mathf.Abs(from.x - to.x) + Mathf.Abs(from.y - to.y)) * ReuseStepCost;
-            }
-
-            private int StateOf(Vector2Int cell, int heading)
-            {
-                return ((cell.y * side) + cell.x) * 4 + heading;
-            }
-
-            private Vector2Int CellOf(int state)
-            {
-                int cellIndex = state >> 2;
-                return new Vector2Int(cellIndex % side, cellIndex / side);
-            }
-
-            private List<Vector2Int> Rebuild(int state)
-            {
-                var route = new List<Vector2Int>();
-                for (int s = state; s >= 0; s = cameFrom[s])
-                {
-                    route.Add(CellOf(s));
-                }
-                route.Reverse();
-                return route;
-            }
-        }
-
-        /// <summary>True if a street touches <paramref name="cell"/> on either side of travel in <paramref name="heading"/>.</summary>
-        private static bool HasLateralStreet(Vector2Int cell, int heading, HashSet<Vector2Int> streets)
-        {
-            Vector2Int lateral = Steps[(heading + 1) & 3];
-            return streets.Contains(cell + lateral) || streets.Contains(cell - lateral);
-        }
-
-        private struct HeapItem
-        {
-            public int F;
-            public int G;
-            public int Key;
-        }
-
-        /// <summary>
-        /// Minimal binary min-heap. Unity's netstandard2.1 profile has no PriorityQueue, and the
-        /// ordering has to be fully specified anyway - ties break on the deeper node first, then on
-        /// the state key, which encodes (y, x, heading) - or the route would depend on heap
-        /// internals and stop being reproducible.
-        /// </summary>
-        private sealed class Heap
-        {
-            private HeapItem[] items = new HeapItem[256];
-            private int count;
-
-            public int Count => count;
-
-            public void Clear()
-            {
-                count = 0;
-            }
-
-            public void Push(HeapItem item)
-            {
-                if (count == items.Length)
-                {
-                    Array.Resize(ref items, count * 2);
-                }
-                int i = count++;
-                items[i] = item;
-                while (i > 0)
-                {
-                    int parent = (i - 1) / 2;
-                    if (!Less(items[i], items[parent]))
-                    {
-                        break;
-                    }
-                    (items[i], items[parent]) = (items[parent], items[i]);
-                    i = parent;
-                }
-            }
-
-            public HeapItem Pop()
-            {
-                HeapItem top = items[0];
-                items[0] = items[--count];
-                int i = 0;
-                while (true)
-                {
-                    int left = i * 2 + 1;
-                    int right = left + 1;
-                    int smallest = i;
-                    if (left < count && Less(items[left], items[smallest])) smallest = left;
-                    if (right < count && Less(items[right], items[smallest])) smallest = right;
-                    if (smallest == i)
-                    {
-                        break;
-                    }
-                    (items[i], items[smallest]) = (items[smallest], items[i]);
-                    i = smallest;
-                }
-                return top;
-            }
-
-            private static bool Less(in HeapItem a, in HeapItem b)
-            {
-                if (a.F != b.F) return a.F < b.F;
-                if (a.G != b.G) return a.G > b.G;
-                return a.Key < b.Key;
-            }
         }
     }
 }

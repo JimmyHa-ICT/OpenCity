@@ -35,7 +35,7 @@ namespace OpenCity.EditorTools
         private const string BridgePath = "Assets/Prefabs/Roads/Highway/road-bridge.prefab";
         private const string RampShortPath = "Assets/Prefabs/Roads/Highway/road-slant-high.prefab";
         private const string RampLongPath = "Assets/Prefabs/Roads/Highway/road-slant-curve.prefab";
-        private const string PillarModelPath = "Assets/Models/bridge-pillar.fbx";
+        private const string PillarModelPath = "Assets/Models/Road/bridge-pillar.fbx";
         private const string PillarFallbackPath = "Assets/Prefabs/Roads/Highway/tile-high.prefab";
         private const string BendPath = "Assets/Prefabs/Roads/road-bend.prefab";
         private const string TJunctionPath = "Assets/Prefabs/Roads/road-intersection.prefab";
@@ -144,7 +144,7 @@ namespace OpenCity.EditorTools
             {
                 error = "a highway kit asset is missing - expected road-bridge, road-slant-high, road-slant-curve " +
                         "(Assets/Prefabs/Roads/Highway), road-bend, road-intersection, road-crossroad " +
-                        "(Assets/Prefabs/Roads) and bridge-pillar (Assets/Models).";
+                        "(Assets/Prefabs/Roads) and bridge-pillar (Assets/Models/Road).";
                 return null;
             }
 

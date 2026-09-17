@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using OpenCity.Tiles;
 using UnityEngine;
 
 namespace OpenCity.EditorTools
@@ -85,24 +86,55 @@ namespace OpenCity.EditorTools
 
         /// <summary>
         /// One region of the BSP tree, in the order SplitRegion visited it (preorder). Kept so
-        /// callers can read the tree back at a chosen depth - see <see cref="Districts"/> - which
-        /// is how the highway planner groups the city into clusters. The rect is the region
-        /// *between* the roads that bound it, so it includes every cut made inside it but not the
-        /// roads on its edges.
+        /// callers can read the tree back - at a chosen depth (see <see cref="Districts"/>, which is
+        /// how the highway planner groups the city into clusters) or whole, through the parent and
+        /// child links (which is what the stored OpenCity.Tiles.CityBspTree and its tree view are
+        /// built from). The rect is the region *between* the roads that bound it, so it includes
+        /// every cut made inside it but not the roads on its edges.
         /// </summary>
         public readonly struct Node
         {
             public readonly RectInt Rect;
             /// <summary>0 for the root region (the whole city, or its interior with a ring road).</summary>
             public readonly int Depth;
-            /// <summary>True if this region was never cut, i.e. it is one of <see cref="Layout.Blocks"/>.</summary>
-            public readonly bool IsLeaf;
+            /// <summary>Index of the parent in <see cref="Layout.Nodes"/>; -1 for the root.</summary>
+            public readonly int Parent;
+            /// <summary>Index of the west (vertical cut) or south (horizontal cut) child; -1 for a leaf.</summary>
+            public readonly int ChildA;
+            /// <summary>Index of the east (vertical cut) or north (horizontal cut) child; -1 for a leaf.</summary>
+            public readonly int ChildB;
+            /// <summary>The 1-cell-wide cut that splits this region; empty for a leaf.</summary>
+            public readonly RectInt Cut;
+            public readonly bool CutVertical;
+            /// <summary>Index into <see cref="Layout.Blocks"/> for a leaf; -1 otherwise.</summary>
+            public readonly int BlockIndex;
+            public readonly BspLeafReason LeafReason;
 
-            public Node(RectInt rect, int depth, bool isLeaf)
+            /// <summary>True if this region was never cut, i.e. it is one of <see cref="Layout.Blocks"/>.</summary>
+            public bool IsLeaf => ChildA < 0;
+
+            private Node(RectInt rect, int depth, int parent, int childA, int childB, RectInt cut, bool cutVertical,
+                int blockIndex, BspLeafReason leafReason)
             {
                 Rect = rect;
                 Depth = depth;
-                IsLeaf = isLeaf;
+                Parent = parent;
+                ChildA = childA;
+                ChildB = childB;
+                Cut = cut;
+                CutVertical = cutVertical;
+                BlockIndex = blockIndex;
+                LeafReason = leafReason;
+            }
+
+            public static Node Leaf(RectInt rect, int depth, int parent, int blockIndex, BspLeafReason reason)
+            {
+                return new Node(rect, depth, parent, -1, -1, default, false, blockIndex, reason);
+            }
+
+            public static Node Split(RectInt rect, int depth, int parent, int childA, int childB, RectInt cut, bool cutVertical)
+            {
+                return new Node(rect, depth, parent, childA, childB, cut, cutVertical, -1, BspLeafReason.NotLeaf);
             }
         }
 
@@ -216,21 +248,27 @@ namespace OpenCity.EditorTools
             if (root.width > 0 && root.height > 0)
             {
                 var rng = new System.Random(settings.Seed);
-                SplitRegion(root, rootRoadSides, 0, settings, rng, roads, blocks, cuts, nodes, counters);
+                SplitRegion(root, rootRoadSides, 0, -1, settings, rng, roads, blocks, cuts, nodes, counters);
             }
 
             return new Layout(n, roads, blocks, cuts, perimeterCells, counters.ForcedSplits, counters.SpacingStops, nodes);
         }
 
         private static void SplitRegion(
-            RectInt region, Side roadSides, int depth, Settings s, System.Random rng,
+            RectInt region, Side roadSides, int depth, int parent, Settings s, System.Random rng,
             HashSet<Vector2Int> roads, List<RectInt> blocks, List<RectInt> cuts, List<Node> nodes, Counters counters)
         {
-            // Recorded as a leaf up front and rewritten in place if this region turns out to be
-            // cut, so `nodes` ends up in preorder (a parent always before its two children)
-            // whichever way the decisions below go.
+            // A slot is reserved up front and filled in once this region's fate is known, so
+            // `nodes` ends up in preorder (a parent always before its two children) whichever way
+            // the decisions below go.
             int nodeIndex = nodes.Count;
-            nodes.Add(new Node(region, depth, true));
+            nodes.Add(default);
+
+            void AddBlock(BspLeafReason reason)
+            {
+                nodes[nodeIndex] = Node.Leaf(region, depth, parent, blocks.Count, reason);
+                blocks.Add(region);
+            }
 
             int minBlock = Mathf.Max(1, s.MinBlockSize);
 
@@ -251,7 +289,7 @@ namespace OpenCity.EditorTools
             bool canSplitHorizontal = tallEnough && (firstRoad || (roadSides & (Side.West | Side.East)) != 0);
             if (!canSplitVertical && !canSplitHorizontal)
             {
-                blocks.Add(region);
+                AddBlock(BspLeafReason.TooSmall);
                 return;
             }
 
@@ -271,7 +309,7 @@ namespace OpenCity.EditorTools
             bool forced = stopByDepth || stopByRoll;
             if (forced && !mustSplit)
             {
-                blocks.Add(region);
+                AddBlock(stopByDepth ? BspLeafReason.MaxDepth : BspLeafReason.StopRoll);
                 return;
             }
 
@@ -302,7 +340,7 @@ namespace OpenCity.EditorTools
             if (offset < 0)
             {
                 counters.SpacingStops++;
-                blocks.Add(region);
+                AddBlock(BspLeafReason.NoCutPosition);
                 return;
             }
             if (forced)
@@ -330,7 +368,6 @@ namespace OpenCity.EditorTools
                 childBSides = (roadSides & ~Side.South) | Side.South;
             }
 
-            nodes[nodeIndex] = new Node(region, depth, false);
             cuts.Add(cut);
             for (int x = cut.xMin; x < cut.xMax; x++)
             {
@@ -342,8 +379,11 @@ namespace OpenCity.EditorTools
 
             // Fixed child order: every rng draw is a function of the traversal, so this order is
             // part of the determinism guarantee.
-            SplitRegion(childA, childASides, depth + 1, s, rng, roads, blocks, cuts, nodes, counters);
-            SplitRegion(childB, childBSides, depth + 1, s, rng, roads, blocks, cuts, nodes, counters);
+            int childAIndex = nodes.Count;
+            SplitRegion(childA, childASides, depth + 1, nodeIndex, s, rng, roads, blocks, cuts, nodes, counters);
+            int childBIndex = nodes.Count;
+            SplitRegion(childB, childBSides, depth + 1, nodeIndex, s, rng, roads, blocks, cuts, nodes, counters);
+            nodes[nodeIndex] = Node.Split(region, depth, parent, childAIndex, childBIndex, cut, vertical);
         }
 
         /// <summary>

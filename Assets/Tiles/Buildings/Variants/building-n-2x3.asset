@@ -1,0 +1,19 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ed7b321860c22e74396c3d0193e67073, type: 3}
+  m_Name: building-n-2x3
+  m_EditorClassIdentifier: Assembly-CSharp::OpenCity.Tiles.BuildingTile
+  piece: {fileID: 5086890027220933043, guid: e32c32331dcfe2544b4c45773d1e8d3e, type: 3}
+  footprint: {x: 2, y: 3}
+  tier: 2
+  weight: 1
+  previewSprite: {fileID: 0}

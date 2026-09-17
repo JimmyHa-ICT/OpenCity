@@ -6,8 +6,9 @@ RuleTile (`Assets/Tiles/New Rule Tile.asset`), every painted cell turns into the
 (dead end / straight / bend / T-junction / crossroad) with the right rotation, so one click on
 **Generate** gives you a finished, fully connected street grid made of the Kenney road kit in
 `Assets/Prefabs/Roads`. The large intersections, where two major roads cross, become the kit's
-3×3 `road-roundabout`. On top of that it can lay an **elevated highway network** linking the
-city's far apart districts — see [City Highway Generator](CityHighwayGenerator.md).
+3×3 `road-roundabout`. On top of that it can deck the city's **main avenues over as elevated
+expressways** — see [City Highway Generator](CityHighwayGenerator.md) — and fill the blocks with
+**buildings** as tiles — see [City Building Generator](CityBuildingGenerator.md).
 
 - **Script**: `Assets/Editor/CityRoadTilemapWindow.cs`
 - **Layout algorithm**: `Assets/Editor/CityBspLayout.cs` (pure integer-grid BSP, no Editor or
@@ -50,8 +51,8 @@ itself, cell by cell (see [Guarantees](#guarantees)), so that can't happen.
 4. Set **Side Length (cells)**, for example `32`. The white square in the Scene view is the city.
 5. Adjust the **BSP** settings while watching the Scene view. Colored squares show every road
    cell by piece type and green outlines show the blocks. Click **Reroll** until you like the layout.
-6. Optional: scroll to **Highways** (on by default) to add elevated routes between the city's far
-   apart districts — see [CityHighwayGenerator.md](CityHighwayGenerator.md).
+6. Optional: scroll to **Highways** (on by default) to turn the main avenues into elevated
+   expressways — see [CityHighwayGenerator.md](CityHighwayGenerator.md).
 7. Click **Generate**. The road cells are painted and the RuleTile spawns a road prefab on each one.
 8. Optional: open `Window > 2D > Tile Palette`, choose **New Tile Palette**, and paint or erase
    roads by hand. Neighboring pieces update themselves.
@@ -381,8 +382,9 @@ The layout depends only on **Side Length**, **Perimeter Ring Road**, the six BSP
 | Cover Tile / Create | `Assets/Tiles/Road Cover Tile.asset` | Painted on the road cells under each roundabout, on the bottom cell of every highway ramp, and (on the Highway Tilemap) on the top cell of every two-cell ramp. **Create** makes the asset at that path if it's missing. |
 
 ### Highways
-Six settings, a Highway Tilemap and a Highway Tile that lay an elevated highway network over the
-finished street grid, on its own Tilemap layer, linking the city's far apart BSP clusters. Documented in full, with its own guarantees and
+Six settings, a Highway Tilemap and a Highway Tile that deck the city's top avenues over as elevated
+expressways, on their own Tilemap layer, with interchanges and on/off ramps. Expressways are planned
+before roundabouts, so a big crossing under the deck gets no roundabout. Documented in full, with its own guarantees and
 troubleshooting, in [CityHighwayGenerator.md](CityHighwayGenerator.md#window-reference).
 
 ### Scene preview
@@ -399,7 +401,7 @@ troubleshooting, in [CityHighwayGenerator.md](CityHighwayGenerator.md#window-ref
 | Cyan | Crossroad (4-way) |
 | Red | Dead end (only with the perimeter off) |
 | Purple 3×3 | A roundabout |
-| Blue outline | A highway cluster (toggle with **Show Clusters**) |
+| Green → red block shading | Street distance from the block to the nearest expressway ramp (toggle with **Show Coverage**) |
 | Blue, at deck height | A highway deck cell |
 | Pink, at ramp height | A highway ramp cell |
 | Magenta | No matching piece (should never appear) |
@@ -413,6 +415,32 @@ a count of each piece type, how many splits Max Block Size forced, and how many 
 whole for intersection spacing. Warnings appear for: no interior roads, Max Block Size that can't
 be reached (under 2 × Min Block Size), a Tilemap whose Grid isn't XZY, and a Road Tile that isn't a
 RuleTile.
+
+### BSP Tree
+A foldout under the preview that shows the current layout's BSP tree: every region the city is
+split into, from the whole city down to its blocks. Each split region lists its two halves (West /
+East for a north–south cut, South / North for an east–west cut). Each row gives the region's size
+and either its cut (`cut N-S at x=12`) or its block number. **Expand All** / **Collapse All** open
+or close the whole tree.
+
+Select a row to highlight it in the Scene view: a yellow outline for the region, orange for the
+road that cuts it, and green for every block inside it. The box under the tree shows the region's
+cell range and depth. For a split region it also shows how the cut divides it and how many blocks
+it contains. For a block it says why the region stopped splitting: too small to cut, Max Split
+Depth reached, stopped by the Stop Probability roll, or no cut position that keeps intersections
+apart. Double-click a row to frame the region in the Scene view.
+
+**Stored tree.** **Generate** also saves the tree in the scene, on a `CityBspTree` component on a
+GameObject named `<Tilemap> BSP Tree (x, y)`, next to the Tilemap in its Grid. Select that object
+and the Inspector shows the same tree view and Scene highlight for the city that was actually
+painted, even after the window's settings have changed. Regenerating the same square replaces the
+stored tree. **Clear City Area** removes every stored tree that overlaps the square. Both are part
+of the same Undo step as the tiles.
+
+The component keeps the tree as a preorder list of nodes (index 0 is the root, and a parent always
+comes before its children). Each node has its rect, depth, parent and child indices, cut, block
+index and leaf reason. All rects are in city-local cells. `GetBlocks()` returns every block in
+Tilemap cells, ready for tools that place buildings.
 
 ### Action bar
 Pinned to the bottom of the window, outside the scrolling settings, so it is always visible:
@@ -498,9 +526,11 @@ consider several smaller cities instead.
   moves away. Measured over 500 seeds at default settings, a 32-cell city averages about 40
   T-junctions and 9 crossroads, and a 64-cell city about 112 and 19. Pure BSP would be almost all
   T-junctions.
-- **Blocks are not stored in the scene.** `CityBspLayout` computes them (they're what the green
-  preview outlines show), but Generate paints only roads. Placing buildings on blocks would be a
-  follow-up tool built on `CityBspLayout.Layout.Blocks`.
+- **Blocks are stored, but nothing is built on them.** Generate saves the whole BSP tree, blocks
+  included, on a `CityBspTree` component (see [BSP Tree](#bsp-tree)), but only paints roads.
+  Placing buildings on blocks would be a follow-up tool built on `CityBspTree.GetBlocks()`. The
+  stored tree doesn't follow hand edits: roads painted or erased in the Tile Palette afterwards
+  aren't reflected in it.
 - **Connection to roads outside the city depends on the Tilemap.** Neighbors on the same Tilemap
   connect automatically; roads made by the prefab-placing tools (`Road`, `SubRoads` objects) are
   unaware of the city.
@@ -515,7 +545,12 @@ consider several smaller cities instead.
 
 ## Files touched by this feature
 - `Assets/Editor/CityRoadTilemapWindow.cs`: the tool (UI, Scene preview, Tilemap painting, undo).
-- `Assets/Editor/CityBspLayout.cs`: the integer-grid BSP layout algorithm.
+- `Assets/Editor/CityBspLayout.cs`: the integer-grid BSP layout algorithm, including the tree of
+  regions it produces.
+- `Assets/Scripts/Tiles/CityBspTree.cs`: the component Generate stores the BSP tree on.
+- `Assets/Editor/CityBspTreePanel.cs`: the tree view and Scene highlight, shared by the window and
+  the Inspector.
+- `Assets/Editor/CityBspTreeEditor.cs`: the `CityBspTree` Inspector.
 - `Assets/Editor/RoadGridPlacer.cs`: existing; used to classify cells by piece type for the
   preview colors and counts, and by the highway layer to resolve its own pieces.
 - `Assets/Editor/RoundaboutPlanner.cs`: picks which crossroads become roundabouts.
